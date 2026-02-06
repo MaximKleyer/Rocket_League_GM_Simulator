@@ -17,12 +17,38 @@ from .match_engine import MatchEngine, SeriesResult
 class SeasonPhase(Enum):
     OFFSEASON = "offseason"
     PRESEASON = "preseason"
-    REGIONAL_1 = "regional_1"
-    REGIONAL_2 = "regional_2"
-    REGIONAL_3 = "regional_3"
-    MAJOR = "major"
+    # Split 1
+    SPLIT1_REGIONAL_1 = "split1_regional_1"
+    SPLIT1_REGIONAL_2 = "split1_regional_2"
+    SPLIT1_REGIONAL_3 = "split1_regional_3"
+    SPLIT1_MAJOR = "split1_major"
+    # Between splits
+    SPLIT_BREAK = "split_break"
+    # Split 2
+    SPLIT2_REGIONAL_1 = "split2_regional_1"
+    SPLIT2_REGIONAL_2 = "split2_regional_2"
+    SPLIT2_REGIONAL_3 = "split2_regional_3"
+    SPLIT2_MAJOR = "split2_major"
+    # Worlds
     WORLDS = "worlds"
     SEASON_END = "season_end"
+
+
+# Helper lists for phase identification
+REGIONAL_PHASES = [
+    SeasonPhase.SPLIT1_REGIONAL_1,
+    SeasonPhase.SPLIT1_REGIONAL_2,
+    SeasonPhase.SPLIT1_REGIONAL_3,
+    SeasonPhase.SPLIT2_REGIONAL_1,
+    SeasonPhase.SPLIT2_REGIONAL_2,
+    SeasonPhase.SPLIT2_REGIONAL_3,
+]
+
+MAJOR_PHASES = [
+    SeasonPhase.SPLIT1_MAJOR,
+    SeasonPhase.SPLIT2_MAJOR,
+    SeasonPhase.WORLDS,
+]
 
 
 @dataclass
@@ -168,6 +194,45 @@ class League:
         """Get standings sorted by rank (best first)."""
         return sorted(self.standings.values(), reverse=True)
     
+    def generate_major_bracket(self, num_teams: int = 8) -> List[ScheduledMatch]:
+        """
+        Generate a major/worlds bracket for top teams.
+        Single elimination bracket.
+        """
+        schedule = []
+        match_id_counter = len(self.schedule)
+        
+        # Get top teams by standings
+        sorted_standings = self.get_sorted_standings()
+        qualified_teams = [s.team_id for s in sorted_standings[:num_teams]]
+        
+        if len(qualified_teams) < 2:
+            return schedule
+        
+        # Create bracket matchups (1v8, 2v7, 3v6, 4v5 for quarterfinals)
+        # Week 1: Quarterfinals
+        qf_matchups = []
+        for i in range(min(4, len(qualified_teams) // 2)):
+            high_seed = qualified_teams[i]
+            low_seed = qualified_teams[-(i + 1)] if len(qualified_teams) > i + 4 else qualified_teams[i + 4] if i + 4 < len(qualified_teams) else None
+            if low_seed:
+                qf_matchups.append((high_seed, low_seed))
+        
+        for home, away in qf_matchups:
+            match = ScheduledMatch(
+                match_id=f"{self.current_phase.value}_{match_id_counter}",
+                home_team_id=home,
+                away_team_id=away,
+                week=1,
+                phase=self.current_phase,
+                best_of=7  # Best of 7 for majors
+            )
+            schedule.append(match)
+            match_id_counter += 1
+        
+        self.schedule.extend(schedule)
+        return schedule
+    
     def update_standings(self, result: SeriesResult):
         """Update standings based on a match result."""
         winner_id = result.winner_id
@@ -270,10 +335,19 @@ class SeasonManager:
         phase_order = [
             SeasonPhase.OFFSEASON,
             SeasonPhase.PRESEASON,
-            SeasonPhase.REGIONAL_1,
-            SeasonPhase.REGIONAL_2,
-            SeasonPhase.REGIONAL_3,
-            SeasonPhase.MAJOR,
+            # Split 1
+            SeasonPhase.SPLIT1_REGIONAL_1,
+            SeasonPhase.SPLIT1_REGIONAL_2,
+            SeasonPhase.SPLIT1_REGIONAL_3,
+            SeasonPhase.SPLIT1_MAJOR,
+            # Between splits
+            SeasonPhase.SPLIT_BREAK,
+            # Split 2
+            SeasonPhase.SPLIT2_REGIONAL_1,
+            SeasonPhase.SPLIT2_REGIONAL_2,
+            SeasonPhase.SPLIT2_REGIONAL_3,
+            SeasonPhase.SPLIT2_MAJOR,
+            # Worlds
             SeasonPhase.WORLDS,
             SeasonPhase.SEASON_END
         ]
@@ -286,11 +360,33 @@ class SeasonManager:
         self.league.current_week = 1
         
         # Generate schedule for regional phases
-        if self.league.current_phase in [SeasonPhase.REGIONAL_1, SeasonPhase.REGIONAL_2, SeasonPhase.REGIONAL_3]:
+        if self.league.current_phase in REGIONAL_PHASES:
             self.league.generate_schedule(self.league.current_phase, weeks=3)
-            self.add_event("phase_start", f"{self.league.current_phase.value.replace('_', ' ').title()} begins!")
+            phase_name = self._format_phase_name(self.league.current_phase)
+            self.add_event("phase_start", f"{phase_name} begins!")
+        
+        # Major phases get a bracket schedule
+        elif self.league.current_phase in MAJOR_PHASES:
+            self.league.generate_major_bracket()
+            phase_name = self._format_phase_name(self.league.current_phase)
+            self.add_event("phase_start", f"{phase_name} begins!")
+        
+        # Split break - training camp time
+        elif self.league.current_phase == SeasonPhase.SPLIT_BREAK:
+            self.add_event("split_break", "Split Break begins! Teams enter training camp.")
         
         return self.league.current_phase
+    
+    def _format_phase_name(self, phase: SeasonPhase) -> str:
+        """Format phase name for display."""
+        name = phase.value
+        # Convert split1_regional_1 -> Split 1 Regional 1
+        if name.startswith('split1_'):
+            return "Split 1 " + name[7:].replace('_', ' ').title()
+        elif name.startswith('split2_'):
+            return "Split 2 " + name[7:].replace('_', ' ').title()
+        else:
+            return name.replace('_', ' ').title()
     
     def simulate_week(self) -> List[SeriesResult]:
         """Simulate all matches for the current week."""
@@ -313,17 +409,28 @@ class SeasonManager:
         
         if not unplayed:
             # Phase complete
-            self.add_event("phase_end", f"{self.league.current_phase.value.replace('_', ' ').title()} complete!")
+            phase_name = self.league.current_phase.value.replace('_', ' ').title()
+            self.add_event("phase_end", f"{phase_name} complete!")
             
-            # Award placements
-            standings = self.league.get_sorted_standings()
-            if standings:
-                winner = standings[0]
-                team = self.teams.get(winner.team_id)
-                if team:
-                    placement = 1
-                    team.season_stats.regional_placements.append(placement)
-                    self.add_event("placement", f"{team.name} wins {self.league.current_phase.value}!")
+            # Award placements for regionals
+            if self.league.current_phase in REGIONAL_PHASES:
+                standings = self.league.get_sorted_standings()
+                if standings:
+                    winner = standings[0]
+                    team = self.teams.get(winner.team_id)
+                    if team:
+                        team.season_stats.regional_placements.append(1)
+                        self.add_event("placement", f"{team.name} wins {phase_name}!")
+            
+            # Award placements for majors
+            elif self.league.current_phase in MAJOR_PHASES:
+                standings = self.league.get_sorted_standings()
+                if standings:
+                    winner = standings[0]
+                    team = self.teams.get(winner.team_id)
+                    if team:
+                        team.season_stats.major_placement = 1
+                        self.add_event("major_winner", f"{team.name} wins the {phase_name}!")
         else:
             self.league.current_week += 1
         

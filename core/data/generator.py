@@ -264,13 +264,19 @@ def generate_league(
 
 def generate_free_agent_pool(
     region: str,
-    count: int = 20
+    count: int = 30
 ) -> List[Player]:
     """Generate a pool of free agents for a region."""
     free_agents = []
     
     # Distribution: more average/prospects in FA pool
-    tiers = ["star"] * 1 + ["good"] * 4 + ["average"] * 10 + ["prospect"] * 5
+    # Adjusted for larger pool
+    tiers = (
+        ["star"] * 2 + 
+        ["good"] * 6 + 
+        ["average"] * 14 + 
+        ["prospect"] * 8
+    )
     
     for _ in range(count):
         tier = random.choice(tiers)
@@ -278,6 +284,213 @@ def generate_free_agent_pool(
         free_agents.append(player)
     
     return free_agents
+
+
+def generate_rookie(region: str, high_potential: bool = False) -> Player:
+    """
+    Generate a rookie (15-17 years old).
+    Rookies have low current ability but varying potential.
+    Small chance for "prodigy" rookies who come in with better stats.
+    
+    Args:
+        region: Player's region
+        high_potential: If True, guarantee high potential (85-95)
+    """
+    name = generate_gamer_tag()
+    age = random.choice([15, 16, 17])
+    nationality = random.choice(NATIONALITIES.get(region, ["USA"]))
+    
+    # Check for prodigy (10% chance, or higher if high_potential is set)
+    prodigy_roll = random.random()
+    is_prodigy = prodigy_roll < 0.10 or (high_potential and prodigy_roll < 0.35)
+    
+    if is_prodigy:
+        # Prodigy: Higher starting stats, usually high potential
+        base_level = random.randint(50, 65)  # Much higher base
+        variance = 12
+        
+        attributes = PlayerAttributes(
+            # Mechanical Skills - prodigies are already skilled
+            aerial=random.randint(base_level, base_level + variance + 5),
+            ground_control=random.randint(base_level - 5, base_level + variance),
+            shooting=random.randint(base_level - 5, base_level + variance),
+            advanced_mechanics=random.randint(base_level - 5, base_level + variance + 10),
+            recovery=random.randint(base_level - 5, base_level + variance),
+            car_control=random.randint(base_level, base_level + variance),
+            
+            # Game Sense - prodigies still have some gaps but are ahead
+            positioning=random.randint(base_level - 10, base_level + 5),
+            game_reading=random.randint(base_level - 10, base_level + 5),
+            decision_making=random.randint(base_level - 15, base_level),
+            passing=random.randint(base_level - 5, base_level + variance),
+            boost_management=random.randint(base_level - 10, base_level + 5),
+            
+            # Defense/Offense
+            saving=random.randint(base_level - 10, base_level + variance),
+            challenging=random.randint(base_level - 10, base_level + 5),
+            finishing=random.randint(base_level - 5, base_level + variance),
+            creativity=random.randint(base_level, base_level + variance + 5),
+            
+            # Meta - prodigies can still be inconsistent
+            speed=random.randint(base_level, base_level + variance + 5),
+            consistency=random.randint(base_level - 15, base_level),  # Still inconsistent
+            clutch=random.randint(base_level - 10, base_level + 5),
+            mental=random.randint(base_level - 10, base_level + 5),
+            teamwork=random.randint(base_level - 10, base_level + 5)
+        )
+        
+        # Prodigies usually have high potential (80% chance of 80+)
+        if high_potential:
+            potential = random.randint(88, 95)
+        else:
+            prodigy_pot_roll = random.random()
+            if prodigy_pot_roll < 0.50:
+                potential = random.randint(85, 95)  # 50% chance elite
+            elif prodigy_pot_roll < 0.80:
+                potential = random.randint(78, 87)  # 30% chance very good
+            else:
+                potential = random.randint(70, 80)  # 20% chance good
+    else:
+        # Normal rookie: Lower starting stats
+        base_level = random.randint(30, 50)
+        variance = 8
+        
+        attributes = PlayerAttributes(
+            # Mechanical Skills - rookies can be flashy but inconsistent
+            aerial=random.randint(base_level - 5, base_level + variance + 5),
+            ground_control=random.randint(base_level - 5, base_level + variance),
+            shooting=random.randint(base_level - 5, base_level + variance),
+            advanced_mechanics=random.randint(base_level - 10, base_level + variance + 10),
+            recovery=random.randint(base_level - 5, base_level + variance),
+            car_control=random.randint(base_level - 5, base_level + variance),
+            
+            # Game Sense - typically lower for rookies
+            positioning=random.randint(base_level - 10, base_level),
+            game_reading=random.randint(base_level - 10, base_level),
+            decision_making=random.randint(base_level - 15, base_level - 5),
+            passing=random.randint(base_level - 10, base_level + 5),
+            boost_management=random.randint(base_level - 10, base_level),
+            
+            # Defense/Offense
+            saving=random.randint(base_level - 10, base_level + 5),
+            challenging=random.randint(base_level - 10, base_level),
+            finishing=random.randint(base_level - 5, base_level + variance),
+            creativity=random.randint(base_level - 5, base_level + variance + 5),
+            
+            # Meta - rookies can be inconsistent but have high ceilings
+            speed=random.randint(base_level, base_level + variance + 5),
+            consistency=random.randint(base_level - 15, base_level - 5),
+            clutch=random.randint(base_level - 10, base_level + 5),
+            mental=random.randint(base_level - 10, base_level + 5),
+            teamwork=random.randint(base_level - 10, base_level + 5)
+        )
+        
+        # Normal potential distribution
+        if high_potential:
+            potential = random.randint(85, 95)
+        else:
+            potential_roll = random.random()
+            if potential_roll < 0.05:
+                potential = random.randint(85, 95)  # 5% chance of star
+            elif potential_roll < 0.20:
+                potential = random.randint(75, 84)  # 15% chance of good
+            elif potential_roll < 0.50:
+                potential = random.randint(65, 74)  # 30% chance of average
+            else:
+                potential = random.randint(50, 64)  # 50% chance of low
+    
+    hidden = HiddenAttributes(
+        potential=potential,
+        ambition=random.randint(40, 90),  # Rookies can be very ambitious
+        adaptability=random.randint(50, 80),  # Young = more adaptable
+        injury_prone=random.randint(10, 30)
+    )
+    
+    player = Player(
+        id=str(uuid.uuid4())[:8],
+        name=name,
+        age=age,
+        nationality=nationality,
+        attributes=attributes,
+        hidden=hidden,
+        morale=random.randint(60, 85),  # Rookies tend to be enthusiastic
+        form=random.randint(40, 60),
+        role=random.choice(["offensive", "playmaker", "defensive", "allrounder"])
+    )
+    
+    return player
+
+
+def generate_rookie_class(region: str, count: int = 5, guarantee_star: bool = False) -> List[Player]:
+    """
+    Generate a class of rookies entering the scene.
+    
+    Args:
+        region: Player's region
+        count: Number of rookies to generate
+        guarantee_star: If True, ensure at least one has top potential (90+)
+    """
+    rookies = []
+    
+    for i in range(count):
+        # First rookie is guaranteed star if requested
+        if guarantee_star and i == 0:
+            rookie = generate_rookie(region, high_potential=True)
+            # Make sure it's truly elite
+            rookie.hidden.potential = random.randint(90, 95)
+        else:
+            rookie = generate_rookie(region, high_potential=False)
+        
+        rookies.append(rookie)
+    
+    return rookies
+
+
+def retire_old_free_agents(
+    free_agent_ids: List[str],
+    players: Dict[str, Player],
+    max_age: int = 28,
+    target_count: int = 30
+) -> List[str]:
+    """
+    Remove older free agents to make room for rookies.
+    Returns updated list of free agent IDs.
+    """
+    current_count = len(free_agent_ids)
+    
+    if current_count <= target_count:
+        return free_agent_ids
+    
+    # Sort by age (oldest first) then by overall (lowest first)
+    def sort_key(pid):
+        p = players.get(pid)
+        if p:
+            return (-p.age, p.overall)
+        return (0, 0)
+    
+    sorted_fas = sorted(free_agent_ids, key=sort_key)
+    
+    # Keep only up to target_count, preferring younger/better players
+    new_fas = []
+    removed = []
+    
+    for pid in sorted_fas:
+        player = players.get(pid)
+        if player:
+            if len(new_fas) < target_count:
+                # Keep younger players and some older valuable ones
+                if player.age < max_age or player.overall > 70:
+                    new_fas.append(pid)
+                else:
+                    removed.append(pid)
+            else:
+                removed.append(pid)
+    
+    # If we still have too many, just trim to target
+    if len(new_fas) > target_count:
+        new_fas = new_fas[:target_count]
+    
+    return new_fas
 
 
 def create_initial_game_state() -> Dict:
@@ -288,8 +501,13 @@ def create_initial_game_state() -> Dict:
     # Generate NA league as the primary league
     league, teams, players = generate_league("NA", num_teams=8)
     
-    # Generate free agent pool
-    free_agents = generate_free_agent_pool("NA", count=15)
+    # Generate larger free agent pool (30 players)
+    free_agents = generate_free_agent_pool("NA", count=25)
+    
+    # Add some rookies to the initial pool
+    rookies = generate_rookie_class("NA", count=5, guarantee_star=False)
+    free_agents.extend(rookies)
+    
     for fa in free_agents:
         players[fa.id] = fa
     
