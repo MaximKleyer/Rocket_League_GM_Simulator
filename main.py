@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.game import Game
-from core.simulation.season import SeasonPhase
+from core.simulation.season import SeasonPhase, REGIONAL_PHASES
 
 
 def clear_screen():
@@ -134,10 +134,28 @@ class CLI:
         
         team = self.game.player_team
         
+        # Format phase name nicely
+        phase_name = self.game.current_phase.value.replace('_', ' ').title()
+        if 'Split1' in phase_name:
+            phase_name = phase_name.replace('Split1 ', 'Split 1 - ')
+        elif 'Split2' in phase_name:
+            phase_name = phase_name.replace('Split2 ', 'Split 2 - ')
+        
+        # Streak display
+        if team.streak > 0:
+            streak_str = f"🔥 {team.streak}W"
+        elif team.streak < 0:
+            streak_str = f"❄️ {abs(team.streak)}L"
+        else:
+            streak_str = "—"
+        
+        # Training status
+        train_status = "✓" if self.game.can_train() else "✗"
+        
         print_header(f"{team.name} ({team.abbreviation})")
-        print(f"Season {self.game.season_number} | {self.game.current_phase.value.replace('_', ' ').title()} | Week {self.game.current_week}")
-        print(f"Record: {team.season_stats.series_record} | Elo: {team.elo}")
-        print(f"Balance: {format_money(team.finances.balance)} | Salary: {format_money(team.monthly_salary)}/mo")
+        print(f"Season {self.game.season_number} | {phase_name} | Week {self.game.current_week}")
+        print(f"Record: {team.season_stats.series_record} | Streak: {streak_str} | Chem: {team.chemistry}/100")
+        print(f"Balance: {format_money(team.finances.balance)} | Training: {train_status}")
         
         print_subheader("MENU")
         print("1. View Roster")
@@ -146,9 +164,13 @@ class CLI:
         print("4. Free Agents")
         print("5. Stat Leaders")
         print("6. Other Teams")
-        print("7. Advance Week")
-        print("8. Save Game")
-        print("9. Exit to Main Menu")
+        if self.game.can_train():
+            print("7. Training 🏋️")
+        else:
+            print("7. Training")
+        print("8. Advance Week")
+        print("9. Save Game")
+        print("0. Exit to Main Menu")
         
         choice = input("\nSelect option: ").strip()
         
@@ -165,10 +187,12 @@ class CLI:
         elif choice == "6":
             self.view_other_teams()
         elif choice == "7":
-            self.advance_week()
+            self.view_training()
         elif choice == "8":
-            self.save_game()
+            self.advance_week()
         elif choice == "9":
+            self.save_game()
+        elif choice == "0":
             self.game = None
     
     def view_roster(self):
@@ -179,19 +203,19 @@ class CLI:
         roster = self.game.get_team_roster(self.game.player_team_id)
         team = self.game.player_team
         
-        print(f"\n{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Role':<12} {'Salary':<10} {'Contract':<8}")
+        print(f"\n{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Morale':<8} {'Role':<10} {'Salary':<10}")
         print("-" * 70)
         
         for i, player in enumerate(roster):
             contract = team.contracts.get(player.id)
             salary_str = format_money(contract.salary) if contract else "N/A"
-            length_str = f"{contract.length}mo" if contract else "N/A"
             starter = "*" if i < 3 else " "
+            morale_icon = self._get_morale_icon(player.morale)
             
             print(f"{starter}{i+1:<2} {player.name:<15} {player.age:<4} {player.overall:<4} "
-                  f"{player.role:<12} {salary_str:<10} {length_str:<8}")
+                  f"{morale_icon:<8} {player.role:<10} {salary_str:<10}")
         
-        print(f"\nTeam Chemistry: {team.chemistry}/100")
+        print(f"\nTeam Chemistry: {team.chemistry}/100 | Streak: {team.streak:+d}")
         print(f"Monthly Payroll: {format_money(team.monthly_salary)}")
         print(f"Cap Space: {format_money(team.salary_cap_space)}")
         
@@ -210,6 +234,19 @@ class CLI:
         elif choice == "3":
             self.swap_roster()
     
+    def _get_morale_icon(self, morale: int) -> str:
+        """Get simple morale icon."""
+        if morale >= 85:
+            return f"😄{morale}"
+        elif morale >= 70:
+            return f"🙂{morale}"
+        elif morale >= 55:
+            return f"😐{morale}"
+        elif morale >= 45:
+            return f"😕{morale}"
+        else:
+            return f"😢{morale}"
+    
     def view_player_details(self, roster):
         """View detailed player stats."""
         idx = input("Enter player number: ").strip()
@@ -222,6 +259,21 @@ class CLI:
             print(f"\nAge: {player.age} | Nationality: {player.nationality}")
             print(f"Overall: {player.overall} | Role: {player.role}")
             print(f"Market Value: {format_money(player.market_value)}")
+            
+            # Morale and development
+            morale_desc = self._get_morale_indicator(player.morale)
+            potential_gap = player.hidden.potential - player.overall
+            if potential_gap > 10:
+                pot_desc = "High potential for growth"
+            elif potential_gap > 5:
+                pot_desc = "Room to develop"
+            elif potential_gap > 0:
+                pot_desc = "Near peak"
+            else:
+                pot_desc = "At maximum potential"
+            
+            print(f"\nMorale: {morale_desc}")
+            print(f"Development: {pot_desc} (Ambition: {player.hidden.ambition})")
             
             print_subheader("ATTRIBUTES")
             attrs = player.attributes
@@ -343,56 +395,122 @@ class CLI:
         input("\nPress Enter to continue...")
     
     def view_free_agents(self):
-        """Display and sign free agents."""
-        clear_screen()
-        print_header("FREE AGENTS")
+        """Display and sign free agents with pagination."""
+        page = 0
+        per_page = 15
         
-        free_agents = self.game.get_free_agents()
+        while True:
+            clear_screen()
+            print_header("FREE AGENTS")
+            
+            free_agents = self.game.get_free_agents()
+            team = self.game.player_team
+            total_players = len(free_agents)
+            total_pages = (total_players + per_page - 1) // per_page
+            
+            print(f"\nYour cap space: {format_money(team.salary_cap_space)}/mo")
+            print(f"Roster spots: {team.roster_size}/5")
+            print(f"Total Free Agents: {total_players}")
+            
+            # Get current page of players
+            start_idx = page * per_page
+            end_idx = min(start_idx + per_page, total_players)
+            page_players = free_agents[start_idx:end_idx]
+            
+            print(f"\n--- Page {page + 1}/{max(1, total_pages)} ---\n")
+            print(f"{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Pot':<5} {'Role':<12} {'Value':<12}")
+            print("-" * 65)
+            
+            for i, player in enumerate(page_players, start_idx + 1):
+                # Show potential indicator for young players
+                pot_indicator = ""
+                if player.age <= 19:
+                    pot = player.hidden.potential
+                    if pot >= 90:
+                        pot_indicator = "★★★"
+                    elif pot >= 80:
+                        pot_indicator = "★★"
+                    elif pot >= 70:
+                        pot_indicator = "★"
+                    else:
+                        pot_indicator = "○"
+                elif player.age <= 22:
+                    pot_indicator = "?"
+                else:
+                    pot_indicator = "-"
+                
+                print(f"{i:<3} {player.name:<15} {player.age:<4} {player.overall:<4} "
+                      f"{pot_indicator:<5} {player.role:<12} {format_money(player.market_value):<12}")
+            
+            print_subheader("OPTIONS")
+            
+            # Navigation options
+            nav_options = []
+            if page > 0:
+                nav_options.append("[P]rev page")
+            if page < total_pages - 1:
+                nav_options.append("[N]ext page")
+            
+            if nav_options:
+                print(" | ".join(nav_options))
+            
+            if team.roster_size < 5:
+                print("Enter # to sign a player")
+            else:
+                print("(Roster full - cannot sign players)")
+            print("[0] Back to menu")
+            
+            choice = input("\nSelect: ").strip().lower()
+            
+            if choice == "0":
+                return
+            elif choice == "n" and page < total_pages - 1:
+                page += 1
+            elif choice == "p" and page > 0:
+                page -= 1
+            elif choice.isdigit() and team.roster_size < 5:
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < total_players:
+                        player = free_agents[idx]
+                        self._sign_free_agent(player)
+                except (ValueError, IndexError):
+                    print("Invalid selection.")
+                    input("\nPress Enter to continue...")
+    
+    def _sign_free_agent(self, player):
+        """Handle signing a specific free agent."""
         team = self.game.player_team
         
-        print(f"\nYour cap space: {format_money(team.salary_cap_space)}/mo")
-        print(f"Roster spots: {team.roster_size}/5\n")
+        print(f"\nSigning {player.name} (Age: {player.age}, OVR: {player.overall})")
         
-        print(f"{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Role':<12} {'Value':<12}")
-        print("-" * 55)
+        # Show potential for young players
+        if player.age <= 19:
+            pot = player.hidden.potential
+            if pot >= 90:
+                print("⭐ ELITE POTENTIAL - Could be a superstar!")
+            elif pot >= 80:
+                print("⭐ High potential prospect")
+            elif pot >= 70:
+                print("Solid potential")
         
-        for i, player in enumerate(free_agents[:15], 1):
-            print(f"{i:<3} {player.name:<15} {player.age:<4} {player.overall:<4} "
-                  f"{player.role:<12} {format_money(player.market_value):<12}")
+        suggested_salary = player.market_value // 20  # Rough monthly estimate
         
-        if team.roster_size >= 5:
-            print("\n(Roster full - cannot sign players)")
-            input("\nPress Enter to continue...")
-            return
+        salary = input(f"Offer monthly salary (suggested ~${suggested_salary:,}): $").strip()
+        salary = int(salary) if salary else suggested_salary
         
-        print_subheader("SIGN PLAYER")
-        idx = input("Enter player number to sign (0 to cancel): ").strip()
+        length = input("Contract length in months (6-24): ").strip()
+        length = int(length) if length else 12
+        length = max(6, min(24, length))
         
-        try:
-            if idx == "0":
-                return
-            player = free_agents[int(idx) - 1]
-            
-            print(f"\nSigning {player.name} (OVR: {player.overall})")
-            suggested_salary = player.market_value // 20  # Rough monthly estimate
-            
-            salary = input(f"Offer monthly salary (suggested ~${suggested_salary}): $").strip()
-            salary = int(salary) if salary else suggested_salary
-            
-            length = input("Contract length in months (6-24): ").strip()
-            length = int(length) if length else 12
-            length = max(6, min(24, length))
-            
-            if salary > team.salary_cap_space:
-                print("Cannot afford this salary!")
-            elif self.game.sign_free_agent(player.id, salary, length):
-                print(f"\n✓ Signed {player.name} for {format_money(salary)}/mo, {length} months!")
-            else:
-                print("Failed to sign player.")
-            
-            input("\nPress Enter to continue...")
-        except (ValueError, IndexError):
-            print("Invalid selection.")
+        if salary > team.salary_cap_space:
+            print("Cannot afford this salary!")
+        elif self.game.sign_free_agent(player.id, salary, length):
+            print(f"\n✓ Signed {player.name} for {format_money(salary)}/mo, {length} months!")
+        else:
+            print("Failed to sign player.")
+        
+        input("\nPress Enter to continue...")
     
     def view_other_teams(self):
         """View other teams' rosters and info."""
@@ -473,6 +591,152 @@ class CLI:
         
         input("\nPress Enter to continue...")
     
+    def view_training(self):
+        """View and manage training allocation."""
+        clear_screen()
+        print_header("TRAINING MANAGEMENT")
+        
+        allocation = self.game.get_training_allocation()
+        can_train = self.game.can_train()
+        team = self.game.player_team
+        
+        # Show roster with morale
+        roster = self.game.get_team_roster(self.game.player_team_id)
+        print("\n📊 ROSTER STATUS:")
+        print(f"{'Name':<15} {'OVR':<4} {'Age':<4} {'Morale':<12} {'Potential':<5}")
+        print("-" * 50)
+        for player in roster[:3]:  # Active roster
+            morale_desc = self._get_morale_indicator(player.morale)
+            pot_indicator = "★" if player.overall < player.hidden.potential - 5 else "◆" if player.overall < player.hidden.potential else "●"
+            print(f"{player.name:<15} {player.overall:<4} {player.age:<4} {morale_desc:<12} {pot_indicator}")
+        
+        print(f"\nTeam Chemistry: {team.chemistry}/100 | Streak: {team.streak:+d}")
+        
+        print_subheader("CURRENT TRAINING FOCUS")
+        print(f"  Mechanical:  {allocation['mechanical']:>3}%  (Aerial, Shooting, Car Control, Recovery)")
+        print(f"  Game Sense:  {allocation['game_sense']:>3}%  (Positioning, Decision Making, Passing)")
+        print(f"  Mental:      {allocation['mental']:>3}%  (Consistency, Clutch, Teamwork)")
+        
+        print_subheader("OPTIONS")
+        if can_train:
+            print("1. 🏋️ DO TRAINING (available this week)")
+        else:
+            print("1. ⏳ Training already done this week")
+        print("2. Set New Allocation")
+        print("3. Quick Presets")
+        print("4. Reset to Default (34/33/33)")
+        print("0. Back")
+        
+        choice = input("\nSelect option: ").strip()
+        
+        if choice == "1" and can_train:
+            self.do_training()
+        elif choice == "2":
+            self.set_training_allocation()
+        elif choice == "3":
+            self.training_presets()
+        elif choice == "4":
+            self.game.reset_training_allocation()
+            print("\n✓ Training reset to balanced allocation (34% / 33% / 33%)")
+            input("\nPress Enter to continue...")
+    
+    def _get_morale_indicator(self, morale: int) -> str:
+        """Get a visual indicator for morale level."""
+        if morale >= 85:
+            return f"😄 {morale} Ecstatic"
+        elif morale >= 70:
+            return f"🙂 {morale} Happy"
+        elif morale >= 55:
+            return f"😐 {morale} Content"
+        elif morale >= 45:
+            return f"😕 {morale} Unhappy"
+        else:
+            return f"😢 {morale} Miserable"
+    
+    def do_training(self):
+        """Execute weekly training."""
+        print("\n🏋️ Running training session...")
+        
+        results = self.game.do_training()
+        
+        if results:
+            print("\n✅ Training Results:")
+            print("-" * 40)
+            
+            for player_id, improvements in results.items():
+                player = self.game.players.get(player_id)
+                if player:
+                    attrs = [f"{imp['attribute']} +{imp['change']}" for imp in improvements]
+                    print(f"  {player.name}: {', '.join(attrs)}")
+            
+            total = sum(len(imps) for imps in results.values())
+            print(f"\nTotal improvements: {total}")
+        else:
+            print("\n📊 No improvements this week. Keep training!")
+            print("   (Young players with high morale train better)")
+        
+        input("\nPress Enter to continue...")
+    
+    def set_training_allocation(self):
+        """Set custom training allocation."""
+        print("\nEnter percentages for each category (must sum to 100):")
+        
+        try:
+            mech = int(input("  Mechanical %: ").strip() or "0")
+            game = int(input("  Game Sense %: ").strip() or "0")
+            ment = int(input("  Mental %:     ").strip() or "0")
+            
+            total = mech + game + ment
+            
+            if total != 100:
+                print(f"\n✗ Total is {total}%, must equal 100%")
+            elif any(x < 0 or x > 100 for x in [mech, game, ment]):
+                print("\n✗ Each value must be between 0 and 100")
+            else:
+                if self.game.set_training_allocation(mech, game, ment):
+                    print(f"\n✓ Training allocation updated:")
+                    print(f"  Mechanical: {mech}% | Game Sense: {game}% | Mental: {ment}%")
+                else:
+                    print("\n✗ Failed to set allocation")
+        except ValueError:
+            print("\n✗ Invalid input - enter numbers only")
+        
+        input("\nPress Enter to continue...")
+    
+    def training_presets(self):
+        """Show training presets."""
+        clear_screen()
+        print_header("TRAINING PRESETS")
+        
+        presets = [
+            ("1", "Balanced",      34, 33, 33, "Even development across all areas"),
+            ("2", "Mechanical",    60, 25, 15, "Focus on mechanics and car control"),
+            ("3", "Tactical",      25, 55, 20, "Focus on positioning and game sense"),
+            ("4", "Mental",        20, 30, 50, "Focus on consistency and clutch plays"),
+            ("5", "Offensive",     50, 35, 15, "Boost shooting and finishing"),
+            ("6", "Defensive",     30, 50, 20, "Improve saves and positioning"),
+        ]
+        
+        print(f"\n{'#':<3} {'Preset':<12} {'Mech':<6} {'Game':<6} {'Ment':<6} {'Description'}")
+        print("-" * 65)
+        
+        for num, name, mech, game, ment, desc in presets:
+            print(f"{num:<3} {name:<12} {mech:>4}%  {game:>4}%  {ment:>4}%  {desc}")
+        
+        print("\n0. Back")
+        
+        choice = input("\nSelect preset: ").strip()
+        
+        preset_map = {p[0]: (p[2], p[3], p[4]) for p in presets}
+        
+        if choice in preset_map:
+            mech, game, ment = preset_map[choice]
+            if self.game.set_training_allocation(mech, game, ment):
+                print(f"\n✓ Applied preset: Mechanical {mech}% | Game Sense {game}% | Mental {ment}%")
+            else:
+                print("\n✗ Failed to apply preset")
+            input("\nPress Enter to continue...")
+    
     def advance_week(self):
         """Advance the game by one week."""
         clear_screen()
@@ -505,10 +769,27 @@ class CLI:
         
         # Check for phase change
         if self.game.current_phase != phase_before:
-            print(f"\n*** Phase Complete! ***")
-            print(f"Moving to: {self.game.current_phase.value.replace('_', ' ').title()}")
+            # Format phase name nicely
+            phase_name = self.game.current_phase.value.replace('_', ' ').title()
+            if 'Split1' in phase_name:
+                phase_name = phase_name.replace('Split1 ', 'Split 1 - ')
+            elif 'Split2' in phase_name:
+                phase_name = phase_name.replace('Split2 ', 'Split 2 - ')
             
-            if self.game.current_phase == SeasonPhase.SEASON_END:
+            print(f"\n*** Phase Complete! ***")
+            print(f"Moving to: {phase_name}")
+            
+            # Special messages for key phases
+            if self.game.current_phase == SeasonPhase.SPLIT_BREAK:
+                print("\n🏕️ SPLIT BREAK - Training Camp!")
+                print("Teams are undergoing intensive training.")
+                print("Chemistry bonuses applied based on roster stability.")
+            
+            elif self.game.current_phase == SeasonPhase.WORLDS:
+                print("\n🏆 WORLD CHAMPIONSHIP!")
+                print("The best teams compete for the world title!")
+            
+            elif self.game.current_phase == SeasonPhase.SEASON_END:
                 print("\n=== SEASON COMPLETE ===")
                 standings = self.game.get_standings()
                 if standings:
@@ -520,21 +801,39 @@ class CLI:
                     self.game.start_new_season()
                     print(f"\n✓ Season {self.game.season_number} begins!")
         
-        # Show recent events (including AI activity)
+        # Show recent events (including AI activity and training)
         events = self.game.get_recent_events(10)
         if events:
             print("\nRecent News:")
             for event in events[-8:]:
-                # Color-code different event types
+                # Emoji prefixes for different event types
                 if event['type'] in ['ai_signing', 'ai_release']:
                     prefix = "📰"
                 elif event['type'] == 'match_result':
                     prefix = "🏆"
                 elif event['type'] in ['signing', 'release']:
                     prefix = "✍️"
+                elif event['type'] == 'training':
+                    prefix = "📈"
+                elif event['type'] in ['split_break_chemistry', 'split_break_training']:
+                    prefix = "🏕️"
+                elif event['type'] in ['phase_start', 'phase_end']:
+                    prefix = "📅"
+                elif event['type'] in ['progression_up', 'season_progression_up']:
+                    prefix = "⬆️"
+                elif event['type'] in ['progression_down', 'season_progression_down']:
+                    prefix = "⬇️"
+                elif event['type'] == 'chemistry_up':
+                    prefix = "💚"
+                elif event['type'] == 'chemistry_down':
+                    prefix = "💔"
                 else:
                     prefix = "•"
                 print(f"  {prefix} {event['message']}")
+        
+        # Show training reminder if available
+        if self.game.can_train() and self.game.current_phase in REGIONAL_PHASES:
+            print("\n💡 TIP: Training available this week! Go to Training menu to train your team.")
         
         input("\nPress Enter to continue...")
     

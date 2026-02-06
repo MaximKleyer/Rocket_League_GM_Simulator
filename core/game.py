@@ -11,9 +11,16 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 from .models.player import Player
-from .models.team import Team, Contract
-from .simulation.season import League, SeasonManager, SeasonPhase
-from .data.generator import create_initial_game_state, generate_player, generate_free_agent_pool
+from .models.team import Team, Contract, TrainingAllocation
+from .simulation.season import League, SeasonManager, SeasonPhase, REGIONAL_PHASES, MAJOR_PHASES
+from .simulation.training import (
+    TrainingManager, MoraleManager, ChemistryManager, ProgressionManager,
+    TRAINING_ATTRIBUTE_MAP
+)
+from .data.generator import (
+    create_initial_game_state, generate_player, generate_free_agent_pool,
+    generate_rookie_class, retire_old_free_agents
+)
 from .ai.team_ai import LeagueAI
 
 
@@ -54,6 +61,7 @@ class Game:
         self.player_team_id: Optional[str] = None  # ID of user's team
         self.season_manager: Optional[SeasonManager] = None
         self.league_ai: Optional[LeagueAI] = None  # AI manager for all teams
+        self.training_manager: TrainingManager = TrainingManager()  # Training system
         
         self.settings = GameSettings()
         
@@ -249,18 +257,424 @@ class Game:
         return True
     
     # =========================================================================
+    # Training Management
+    # =========================================================================
+    
+    def get_training_allocation(self) -> dict:
+        """Get current training allocation for player's team."""
+        if not self.player_team:
+            return {'mechanical': 34, 'game_sense': 33, 'mental': 33}
+        return self.player_team.training.to_dict()
+    
+    def set_training_allocation(self, mechanical: int, game_sense: int, mental: int) -> bool:
+        """
+        Set training allocation for player's team.
+        Returns True if valid (sums to 100).
+        """
+        if not self.player_team:
+            return False
+        return self.player_team.training.set_allocation(mechanical, game_sense, mental)
+    
+    def reset_training_allocation(self):
+        """Reset training to default balanced allocation."""
+        if self.player_team:
+            self.player_team.training.reset_to_default()
+    
+    def can_train(self) -> bool:
+        """Check if player's team can train this week."""
+        if not self.player_team:
+            return False
+        return self.training_manager.can_train(self.player_team_id)
+    
+    def do_training(self) -> Dict[str, List[dict]]:
+        """
+        Player-initiated weekly training for their team.
+        Can only be done once per week.
+        Returns dict of {player_id: [improvements]}.
+        """
+        if not self.player_team:
+            return {}
+        
+        if not self.can_train():
+            return {}
+        
+        roster = self.get_team_roster(self.player_team_id)
+        results = self.training_manager.process_weekly_training(
+            roster,
+            self.player_team.training,
+            self.player_team.chemistry,
+            mark_trained=True,
+            team_id=self.player_team_id
+        )
+        
+        # Log improvements
+        for player_id, improvements in results.items():
+            player = self.players.get(player_id)
+            if player and improvements:
+                attrs = [imp['attribute'] for imp in improvements]
+                self.season_manager.add_event(
+                    "training",
+                    f"{player.name} improved: {', '.join(attrs)}",
+                    data={'player_id': player_id, 'improvements': improvements}
+                )
+        
+        return results
+    
+    def process_ai_training(self):
+        """Process training for all AI teams."""
+        for team_id, team in self.teams.items():
+            if team_id == self.player_team_id:
+                continue  # Skip player team
+            
+            if not self.training_manager.can_train(team_id):
+                continue
+            
+            roster = self.get_team_roster(team_id)
+            self.training_manager.process_weekly_training(
+                roster,
+                team.training,
+                team.chemistry,
+                mark_trained=True,
+                team_id=team_id
+            )
+    
+    def get_team_average_morale(self, team_id: str) -> float:
+        """Get average morale of a team's active roster."""
+        roster = self.get_team_roster(team_id)
+        if not roster:
+            return 50.0
+        active = roster[:3]  # Active players only
+        return sum(p.morale for p in active) / len(active)
+    
+    def update_morale_after_match(self, team_id: str, won: bool, player_stats: dict = None):
+        """Update morale for all players on a team after a match."""
+        team = self.teams.get(team_id)
+        if not team:
+            return
+        
+        roster = self.get_team_roster(team_id)
+        for i, player in enumerate(roster):
+            is_starter = i < 3
+            goals = 0
+            was_mvp = False
+            
+            if player_stats and player.id in player_stats:
+                goals = player_stats[player.id].get('goals', 0)
+                was_mvp = player_stats[player.id].get('mvp', False)
+            
+            MoraleManager.update_morale_after_match(
+                player, won, is_starter, team.chemistry, goals, was_mvp
+            )
+    
+    def update_chemistry_after_match(self, team_id: str, won: bool) -> int:
+        """Update chemistry for a team after a match. Returns the change."""
+        team = self.teams.get(team_id)
+        if not team:
+            return 0
+        
+        # Update streak
+        if won:
+            if team.streak >= 0:
+                team.streak += 1
+            else:
+                team.streak = 1
+        else:
+            if team.streak <= 0:
+                team.streak -= 1
+            else:
+                team.streak = -1
+        
+        # Get average morale
+        avg_morale = self.get_team_average_morale(team_id)
+        
+        # Update chemistry
+        new_chem, change = ChemistryManager.update_chemistry_after_match(
+            team.chemistry, won, avg_morale, team.streak
+        )
+        team.chemistry = new_chem
+        
+        return change
+    
+    def process_split_break(self) -> Dict[str, dict]:
+        """
+        Process split break for all teams.
+        Includes natural regression, progression, intensive training camp, and chemistry boost.
+        Returns dict with results per team.
+        """
+        results = {
+            'natural_regression': {},
+            'progression': {},
+            'training': {},
+            'chemistry': {}
+        }
+        
+        for team_id, team in self.teams.items():
+            roster = self.get_team_roster(team_id)
+            
+            # Get team record for performance factor
+            team_wins = team.season_stats.series_wins
+            team_losses = team.season_stats.series_losses
+            
+            # ===== NATURAL REGRESSION =====
+            # All players lose a bit due to meta shifts and rust
+            team_regression = {}
+            for player in roster:
+                reg_changes = ProgressionManager.apply_natural_regression(player)
+                if reg_changes:
+                    team_regression[player.id] = {
+                        'name': player.name,
+                        'changes': reg_changes,
+                        'new_overall': player.overall
+                    }
+            
+            if team_regression:
+                results['natural_regression'][team_id] = team_regression
+            
+            # ===== PROGRESSION =====
+            # Players upgrade or regress based on morale, age, performance, RNG
+            team_progression = {}
+            for player in roster:
+                changes = ProgressionManager.process_split_progression(
+                    player, team_wins, team_losses
+                )
+                if changes:
+                    team_progression[player.id] = {
+                        'name': player.name,
+                        'changes': changes,
+                        'new_overall': player.overall
+                    }
+            
+            if team_progression:
+                results['progression'][team_id] = team_progression
+            
+            # ===== CHEMISTRY BOOST =====
+            # Get previous roster (stored at end of Split 1)
+            previous_roster = getattr(team, '_split1_roster', [])
+            
+            new_chem, chem_desc = self.training_manager.calculate_chemistry_boost(
+                team.roster[:3],
+                previous_roster[:3] if previous_roster else [],
+                team.chemistry
+            )
+            
+            old_chemistry = team.chemistry
+            team.chemistry = new_chem
+            
+            results['chemistry'][team_id] = {
+                'team_name': team.name,
+                'old_chemistry': old_chemistry,
+                'new_chemistry': new_chem,
+                'boost': new_chem - old_chemistry,
+                'description': chem_desc
+            }
+            
+            # ===== INTENSIVE TRAINING =====
+            training_results = self.training_manager.process_split_break_training(
+                roster,
+                team.training,
+                team.chemistry,
+                sessions=4
+            )
+            
+            if training_results:
+                results['training'][team_id] = training_results
+        
+        # Log player team's results
+        if self.player_team_id:
+            # Natural regression
+            reg_info = results['natural_regression'].get(self.player_team_id, {})
+            if reg_info:
+                total_reg = sum(sum(p['changes'].values()) for p in reg_info.values())
+                if total_reg < 0:
+                    self.season_manager.add_event(
+                        "natural_regression",
+                        f"⏳ Meta shifts and rust: {abs(total_reg)} total stat decay across roster",
+                        data=reg_info
+                    )
+            
+            # Progression
+            prog_info = results['progression'].get(self.player_team_id, {})
+            for player_id, info in prog_info.items():
+                total_change = sum(info['changes'].values())
+                if total_change > 0:
+                    self.season_manager.add_event(
+                        "progression_up",
+                        f"📈 {info['name']} developed! Overall now {info['new_overall']} (+{total_change})",
+                        data=info
+                    )
+                elif total_change < 0:
+                    self.season_manager.add_event(
+                        "progression_down",
+                        f"📉 {info['name']} regressed. Overall now {info['new_overall']} ({total_change})",
+                        data=info
+                    )
+            
+            # Chemistry
+            chem_info = results['chemistry'].get(self.player_team_id, {})
+            if chem_info:
+                boost = chem_info['boost']
+                boost_str = f"+{boost}" if boost >= 0 else str(boost)
+                self.season_manager.add_event(
+                    "split_break_chemistry",
+                    f"Chemistry {chem_info['old_chemistry']} → {chem_info['new_chemistry']} ({boost_str}). {chem_info['description']}",
+                    data=chem_info
+                )
+            
+            # Training
+            training_info = results['training'].get(self.player_team_id, {})
+            if training_info:
+                total_improvements = sum(len(imps) for imps in training_info.values())
+                self.season_manager.add_event(
+                    "split_break_training",
+                    f"Training camp complete! {total_improvements} attribute improvements.",
+                    data={'improvements': training_info}
+                )
+        
+        return results
+    
+    def process_season_end_progression(self) -> Dict[str, dict]:
+        """
+        Process progression for all players at season end.
+        Bigger changes than split breaks, includes natural regression.
+        """
+        results = {
+            'natural_regression': {},
+            'progression': {}
+        }
+        
+        for team_id, team in self.teams.items():
+            roster = self.get_team_roster(team_id)
+            
+            # Get team record for performance factor
+            team_wins = team.season_stats.series_wins
+            team_losses = team.season_stats.series_losses
+            
+            # ===== NATURAL REGRESSION =====
+            team_regression = {}
+            for player in roster:
+                reg_changes = ProgressionManager.apply_natural_regression(player)
+                if reg_changes:
+                    team_regression[player.id] = {
+                        'name': player.name,
+                        'changes': reg_changes,
+                        'new_overall': player.overall
+                    }
+            
+            if team_regression:
+                results['natural_regression'][team_id] = team_regression
+            
+            # ===== PROGRESSION =====
+            team_progression = {}
+            for player in roster:
+                changes = ProgressionManager.process_season_end_progression(
+                    player, team_wins, team_losses
+                )
+                if changes:
+                    team_progression[player.id] = {
+                        'name': player.name,
+                        'changes': changes,
+                        'new_overall': player.overall
+                    }
+            
+            if team_progression:
+                results['progression'][team_id] = team_progression
+        
+        # Also process free agents (no team record bonus)
+        for player_id in self.free_agent_ids:
+            player = self.players.get(player_id)
+            if player:
+                ProgressionManager.apply_natural_regression(player)
+                ProgressionManager.process_season_end_progression(player, 0, 0)
+        
+        # Log player team's results
+        if self.player_team_id:
+            # Natural regression
+            reg_info = results['natural_regression'].get(self.player_team_id, {})
+            if reg_info:
+                total_reg = sum(sum(p['changes'].values()) for p in reg_info.values())
+                if total_reg < 0:
+                    self.season_manager.add_event(
+                        "season_regression",
+                        f"⏳ Offseason rust: {abs(total_reg)} total stat decay across roster",
+                        data=reg_info
+                    )
+            
+            # Progression
+            prog_info = results['progression'].get(self.player_team_id, {})
+            for player_id, info in prog_info.items():
+                total_change = sum(info['changes'].values())
+                if total_change > 0:
+                    self.season_manager.add_event(
+                        "season_progression_up",
+                        f"📈 {info['name']} had a growth spurt! Overall now {info['new_overall']} (+{total_change})",
+                        data=info
+                    )
+                elif total_change < 0:
+                    self.season_manager.add_event(
+                        "season_progression_down",
+                        f"📉 {info['name']} declined. Overall now {info['new_overall']} ({total_change})",
+                        data=info
+                    )
+        
+        return results
+    
+    def store_split1_rosters(self):
+        """Store current rosters at end of Split 1 for chemistry calculation."""
+        for team_id, team in self.teams.items():
+            team._split1_roster = list(team.roster)
+    
+    # =========================================================================
     # Season Progression
     # =========================================================================
     
     def advance_week(self) -> List[dict]:
         """
         Advance the game by one week.
-        Simulates matches and returns results.
+        Simulates matches and processes morale/chemistry.
+        AI teams train automatically. Player training is manual.
+        Returns match results.
         """
         if not self.season_manager:
             return []
         
+        # Reset training flags for new week
+        self.training_manager.reset_weekly_training()
+        
+        # AI teams train automatically during regional phases
+        if self.current_phase in REGIONAL_PHASES:
+            self.process_ai_training()
+        
+        # Simulate matches
         results = self.season_manager.simulate_week()
+        
+        # Process morale and chemistry after matches
+        for result in results:
+            # Update both teams
+            home_won = result.winner_id == result.home_team_id
+            
+            # Home team
+            self.update_morale_after_match(result.home_team_id, home_won)
+            chem_change = self.update_chemistry_after_match(result.home_team_id, home_won)
+            
+            # Away team
+            self.update_morale_after_match(result.away_team_id, not home_won)
+            self.update_chemistry_after_match(result.away_team_id, not home_won)
+            
+            # Log chemistry changes for player team if significant
+            if self.player_team_id in [result.home_team_id, result.away_team_id]:
+                player_won = (result.winner_id == self.player_team_id)
+                team = self.player_team
+                if abs(chem_change) >= 2:
+                    if chem_change > 0:
+                        self.season_manager.add_event(
+                            "chemistry_up",
+                            f"Team chemistry improved to {team.chemistry}! (Streak: {team.streak:+d})"
+                        )
+                    else:
+                        self.season_manager.add_event(
+                            "chemistry_down", 
+                            f"Team chemistry dropped to {team.chemistry}. (Streak: {team.streak:+d})"
+                        )
         
         # Process AI roster moves (chance each week)
         if self.league_ai and random.random() < 0.3:  # 30% chance per week
@@ -311,30 +725,91 @@ class Game:
         if not self.season_manager:
             return SeasonPhase.OFFSEASON
         
+        # Store rosters before advancing from Split 1 Major (for chemistry calculation)
+        if self.current_phase == SeasonPhase.SPLIT1_MAJOR:
+            self.store_split1_rosters()
+        
         new_phase = self.season_manager.advance_phase()
         
-        # AI teams make moves between phases
-        if self.league_ai and new_phase in [SeasonPhase.REGIONAL_2, SeasonPhase.REGIONAL_3, 
-                                             SeasonPhase.MAJOR, SeasonPhase.OFFSEASON]:
+        # AI teams make moves between regional phases and during breaks
+        ai_move_phases = [
+            SeasonPhase.SPLIT1_REGIONAL_2, SeasonPhase.SPLIT1_REGIONAL_3,
+            SeasonPhase.SPLIT2_REGIONAL_2, SeasonPhase.SPLIT2_REGIONAL_3,
+            SeasonPhase.SPLIT_BREAK, SeasonPhase.OFFSEASON
+        ]
+        if self.league_ai and new_phase in ai_move_phases:
             self.process_ai_moves()
         
+        # Process split break (progression + training camp + chemistry boost)
+        if new_phase == SeasonPhase.SPLIT_BREAK:
+            self.process_split_break()
+        
+        # Process season end (bigger progression + aging)
         if new_phase == SeasonPhase.SEASON_END:
+            self.process_season_end_progression()
             self.season_manager.process_end_of_season()
+            
+            # Reset streaks for all teams
+            for team in self.teams.values():
+                team.streak = 0
         
         return new_phase
     
     def start_new_season(self):
-        """Start a new season."""
+        """
+        Start a new season.
+        Adds rookies (with guaranteed star potential), manages FA pool size.
+        """
         if not self.season_manager:
             return
         
-        # Generate new free agents
-        new_fas = generate_free_agent_pool(self.league.region, count=10)
-        for fa in new_fas:
-            self.players[fa.id] = fa
-            self.free_agent_ids.append(fa.id)
+        # ===== RETIRE OLD FREE AGENTS =====
+        # Keep pool manageable by removing older/weaker FAs
+        self.free_agent_ids = retire_old_free_agents(
+            self.free_agent_ids,
+            self.players,
+            max_age=28,
+            target_count=25
+        )
         
-        # AI teams make offseason moves (multiple rounds)
+        # ===== ADD ROOKIE CLASS =====
+        # New young players entering the scene (guaranteed star after Worlds!)
+        rookies = generate_rookie_class(
+            self.league.region, 
+            count=6,  # 6 new rookies each season
+            guarantee_star=True  # At least one has 90+ potential
+        )
+        
+        for rookie in rookies:
+            self.players[rookie.id] = rookie
+            self.free_agent_ids.append(rookie.id)
+        
+        # Log the rookies
+        star_rookies = [r for r in rookies if r.hidden.potential >= 85]
+        if star_rookies:
+            names = ", ".join(r.name for r in star_rookies)
+            self.season_manager.add_event(
+                "rookie_class",
+                f"🌟 New rookie class announced! High-potential prospects: {names}",
+                data={'rookies': [r.to_dict() for r in star_rookies]}
+            )
+        else:
+            self.season_manager.add_event(
+                "rookie_class",
+                f"🎓 {len(rookies)} new rookies enter the free agent pool",
+                data={'count': len(rookies)}
+            )
+        
+        # ===== ADD REGULAR FREE AGENTS =====
+        # Fill back up to ~30 total if needed
+        current_count = len(self.free_agent_ids)
+        if current_count < 30:
+            new_fas = generate_free_agent_pool(self.league.region, count=30 - current_count)
+            for fa in new_fas:
+                self.players[fa.id] = fa
+                self.free_agent_ids.append(fa.id)
+        
+        # ===== AI OFFSEASON MOVES =====
         if self.league_ai:
             for _ in range(3):  # 3 rounds of AI moves
                 self.process_ai_moves()

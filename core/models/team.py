@@ -9,6 +9,38 @@ import uuid
 
 
 @dataclass
+class TrainingAllocation:
+    """Training focus allocation - imported here to avoid circular imports."""
+    mechanical: int = 34
+    game_sense: int = 33
+    mental: int = 33
+    
+    def set_allocation(self, mechanical: int, game_sense: int, mental: int) -> bool:
+        if mechanical + game_sense + mental != 100:
+            return False
+        if any(x < 0 or x > 100 for x in [mechanical, game_sense, mental]):
+            return False
+        self.mechanical = mechanical
+        self.game_sense = game_sense
+        self.mental = mental
+        return True
+    
+    def reset_to_default(self):
+        self.mechanical = 34
+        self.game_sense = 33
+        self.mental = 33
+    
+    def to_dict(self) -> dict:
+        return {'mechanical': self.mechanical, 'game_sense': self.game_sense, 'mental': self.mental}
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'TrainingAllocation':
+        return cls(mechanical=data.get('mechanical', 34), 
+                   game_sense=data.get('game_sense', 33), 
+                   mental=data.get('mental', 33))
+
+
+@dataclass
 class Contract:
     """Player contract details."""
     player_id: str
@@ -159,6 +191,15 @@ class Team:
     # Is this the player's team?
     is_player_team: bool = False
     
+    # Training allocation
+    training: TrainingAllocation = field(default_factory=TrainingAllocation)
+    
+    # Previous roster for chemistry calculations (stored at split boundaries)
+    previous_roster: List[str] = field(default_factory=list)
+    
+    # Win/loss streak tracking (positive = win streak, negative = lose streak)
+    streak: int = 0
+    
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())[:8]
@@ -291,7 +332,10 @@ class Team:
             'all_time_stats': self.all_time_stats.to_dict(),
             'finances': self.finances.to_dict(),
             'elo': self.elo,
-            'is_player_team': self.is_player_team
+            'is_player_team': self.is_player_team,
+            'training': self.training.to_dict(),
+            'previous_roster': self.previous_roster,
+            'streak': self.streak
         }
     
     @classmethod
@@ -306,13 +350,18 @@ class Team:
             reputation=data.get('reputation', 50),
             fan_base=data.get('fan_base', 50),
             elo=data.get('elo', 1500),
-            is_player_team=data.get('is_player_team', False)
+            is_player_team=data.get('is_player_team', False),
+            previous_roster=data.get('previous_roster', []),
+            streak=data.get('streak', 0)
         )
         
         team.contracts = {k: Contract.from_dict(v) for k, v in data.get('contracts', {}).items()}
         team.season_stats = TeamStats.from_dict(data.get('season_stats', {}))
         team.all_time_stats = TeamStats.from_dict(data.get('all_time_stats', {}))
         team.finances = Finances.from_dict(data.get('finances', {}))
+        
+        if 'training' in data:
+            team.training = TrainingAllocation.from_dict(data['training'])
         
         return team
     
