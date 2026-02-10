@@ -147,8 +147,9 @@ class TeamAI:
         # Release expensive underperformers
         contract = self.team.contracts.get(player.id)
         if contract:
-            value_per_dollar = player_value / max(contract.salary, 1000)
-            if value_per_dollar < 0.01 and player.overall < roster_analysis["avg_overall"]:
+            # With yearly salaries ($12k-$150k), adjust threshold accordingly
+            value_per_dollar = player_value / max(contract.salary, 12000)
+            if value_per_dollar < 0.001 and player.overall < roster_analysis["avg_overall"]:
                 return True, f"salary too high for performance"
         
         # Release old players on rebuilding teams
@@ -170,8 +171,22 @@ class TeamAI:
         """
         fa_value = self.evaluate_player_value(free_agent)
         
-        # Calculate appropriate salary offer
-        base_salary = free_agent.market_value // 20
+        # Calculate appropriate yearly salary offer based on overall
+        # Use a simple tier system similar to ContractNegotiator
+        if free_agent.overall >= 85:
+            base_salary = 100000
+        elif free_agent.overall >= 80:
+            base_salary = 75000
+        elif free_agent.overall >= 75:
+            base_salary = 55000
+        elif free_agent.overall >= 70:
+            base_salary = 42000
+        elif free_agent.overall >= 65:
+            base_salary = 32000
+        elif free_agent.overall >= 60:
+            base_salary = 24000
+        else:
+            base_salary = 18000
         
         # Adjust based on how much we want them
         if fa_value > roster_analysis["avg_overall"] * 1.1:
@@ -182,7 +197,7 @@ class TeamAI:
             salary_mod = 0.8
         
         offer_salary = int(base_salary * salary_mod)
-        offer_salary = max(1500, min(offer_salary, max_salary))
+        offer_salary = max(12000, min(offer_salary, max_salary))  # Min $12k/year
         
         # Decision logic
         reason = ""
@@ -364,12 +379,13 @@ class LeagueAI:
                     player_id = action["player_id"]
                     if player_id in free_agent_ids and team.roster_size < 5:
                         salary = action["salary"]
+                        years = random.randint(1, 3)  # 1-3 year contracts
                         contract = Contract(
                             player_id=player_id,
                             team_id=team_id,
                             salary=salary,
-                            length=random.randint(6, 18),
-                            buyout=salary * 3
+                            years=years,
+                            buyout=salary * 2
                         )
                         team.add_player(player_id, contract)
                         self.players[player_id].team_id = team_id
