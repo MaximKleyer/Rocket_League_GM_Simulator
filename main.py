@@ -162,7 +162,7 @@ class CLI:
         print("2. View Standings")
         print("3. View Schedule")
         print("4. Free Agents")
-        print("5. Stat Leaders")
+        print("5. Contracts")
         print("6. Other Teams")
         if self.game.can_train():
             print("7. Training 🏋️")
@@ -183,7 +183,7 @@ class CLI:
         elif choice == "4":
             self.view_free_agents()
         elif choice == "5":
-            self.view_stat_leaders()
+            self.view_contracts()
         elif choice == "6":
             self.view_other_teams()
         elif choice == "7":
@@ -203,21 +203,26 @@ class CLI:
         roster = self.game.get_team_roster(self.game.player_team_id)
         team = self.game.player_team
         
-        print(f"\n{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Morale':<8} {'Role':<10} {'Salary':<10}")
+        print(f"\n{'#':<3} {'Name':<15} {'Age':<4} {'OVR':<4} {'Morale':<8} {'Salary':<12} {'Contract'}")
         print("-" * 70)
         
         for i, player in enumerate(roster):
             contract = team.contracts.get(player.id)
-            salary_str = format_money(contract.salary) if contract else "N/A"
+            if contract:
+                salary_str = f"${contract.salary:,}/yr"
+                contract_str = f"{contract.years}yr" + (" ⚠️" if contract.years <= 1 else "")
+            else:
+                salary_str = "N/A"
+                contract_str = "N/A"
             starter = "*" if i < 3 else " "
             morale_icon = self._get_morale_icon(player.morale)
             
             print(f"{starter}{i+1:<2} {player.name:<15} {player.age:<4} {player.overall:<4} "
-                  f"{morale_icon:<8} {player.role:<10} {salary_str:<10}")
+                  f"{morale_icon:<8} {salary_str:<12} {contract_str}")
         
         print(f"\nTeam Chemistry: {team.chemistry}/100 | Streak: {team.streak:+d}")
-        print(f"Monthly Payroll: {format_money(team.monthly_salary)}")
-        print(f"Cap Space: {format_money(team.salary_cap_space)}")
+        print(f"Yearly Payroll: ${team.yearly_salary:,}")
+        print(f"Cap Space: ${team.salary_cap_space:,}")
         
         print_subheader("ACTIONS")
         print("1. View Player Details")
@@ -479,36 +484,230 @@ class CLI:
                     input("\nPress Enter to continue...")
     
     def _sign_free_agent(self, player):
-        """Handle signing a specific free agent."""
+        """Handle contract negotiation with a free agent."""
+        self._negotiate_contract(player, is_re_sign=False)
+    
+    def _negotiate_contract(self, player, is_re_sign: bool = False):
+        """
+        Full contract negotiation flow.
+        Works for both free agents and re-signings.
+        """
+        clear_screen()
+        
+        action = "RE-SIGN" if is_re_sign else "SIGN"
+        print_header(f"CONTRACT NEGOTIATION - {action}")
+        
         team = self.game.player_team
         
-        print(f"\nSigning {player.name} (Age: {player.age}, OVR: {player.overall})")
+        # Start negotiation
+        state = self.game.start_negotiation(player.id, is_re_sign)
+        if not state:
+            print("Unable to start negotiations.")
+            input("\nPress Enter to continue...")
+            return
         
-        # Show potential for young players
-        if player.age <= 19:
-            pot = player.hidden.potential
-            if pot >= 90:
-                print("⭐ ELITE POTENTIAL - Could be a superstar!")
-            elif pot >= 80:
-                print("⭐ High potential prospect")
-            elif pot >= 70:
-                print("Solid potential")
+        while not state.negotiations_ended:
+            clear_screen()
+            print_header(f"CONTRACT NEGOTIATION - {player.name}")
+            
+            # Player info
+            print(f"\n{'='*50}")
+            print(f"Player: {player.name} (Age: {player.age})")
+            print(f"Overall: {player.overall} | Role: {player.role}")
+            
+            # Show potential for young players
+            if player.age <= 19:
+                pot = player.hidden.potential
+                if pot >= 90:
+                    print("⭐ ELITE POTENTIAL")
+                elif pot >= 80:
+                    print("⭐ High Potential")
+                elif pot >= 70:
+                    print("★ Solid Potential")
+            
+            print(f"{'='*50}")
+            
+            # Negotiation status
+            print(f"\n📋 NEGOTIATION STATUS")
+            print(f"   Willingness: {state.current_willingness.color_indicator} {state.current_willingness}")
+            print(f"   Market Value: ${state.market_value:,}/year")
+            print(f"   Asking Price: ${state.asking_price:,}/year")
+            if state.previous_salary > 0:
+                print(f"   Previous Salary: ${state.previous_salary:,}/year")
+            print(f"   Offers Made: {state.offers_made}/{state.max_offers}")
+            
+            # Team budget
+            print(f"\n💰 YOUR BUDGET")
+            print(f"   Yearly Cap Space: ${team.salary_cap_space:,}")
+            print(f"   Current Payroll: ${team.yearly_salary:,}/year")
+            
+            # Options
+            print(f"\n{'='*50}")
+            print("OPTIONS:")
+            print("1. Make Offer")
+            print("2. End Negotiations")
+            print("0. Back (negotiations continue)")
+            
+            choice = input("\nSelect: ").strip()
+            
+            if choice == "1":
+                self._make_offer(state, player, team)
+            elif choice == "2":
+                confirm = input(f"\nEnd talks with {player.name}? (y/n): ").strip().lower()
+                if confirm == 'y':
+                    message = self.game.end_contract_talks(state)
+                    print(f"\n{message}")
+                    input("\nPress Enter to continue...")
+                    return
+            elif choice == "0":
+                return
         
-        suggested_salary = player.market_value // 20  # Rough monthly estimate
+        input("\nPress Enter to continue...")
+    
+    def _make_offer(self, state, player, team):
+        """Make a contract offer."""
+        print(f"\n--- MAKE OFFER ---")
+        print(f"Player asking: ${state.asking_price:,}/year")
+        print(f"Your cap space: ${team.salary_cap_space:,}/year")
         
-        salary = input(f"Offer monthly salary (suggested ~${suggested_salary:,}): $").strip()
-        salary = int(salary) if salary else suggested_salary
+        try:
+            # Get salary offer
+            salary_input = input(f"\nYearly salary offer (0 to cancel): $").strip()
+            if not salary_input or salary_input == "0":
+                return
+            
+            salary = int(salary_input.replace(",", ""))
+            
+            if salary > team.salary_cap_space:
+                print("\n❌ Cannot afford this salary!")
+                input("\nPress Enter to continue...")
+                return
+            
+            # Get contract length
+            years_input = input("Contract length (1-5 years): ").strip()
+            years = int(years_input) if years_input else 2
+            years = max(1, min(5, years))
+            
+            # Show offer summary
+            print(f"\n📄 OFFER SUMMARY:")
+            print(f"   Salary: ${salary:,}/year")
+            print(f"   Length: {years} year{'s' if years > 1 else ''}")
+            print(f"   Total Value: ${salary * years:,}")
+            
+            offer_percent = (salary / state.asking_price * 100) if state.asking_price > 0 else 100
+            print(f"   vs Asking: {offer_percent:.0f}%")
+            
+            if offer_percent < 80:
+                print("   ⚠️  WARNING: This is a lowball offer!")
+            
+            confirm = input("\nSubmit this offer? (y/n): ").strip().lower()
+            if confirm != 'y':
+                return
+            
+            # Make the offer
+            accepted, message = self.game.make_contract_offer(state, salary, years)
+            
+            if accepted:
+                print(f"\n✅ {message}")
+            else:
+                print(f"\n❌ {message}")
+            
+            input("\nPress Enter to continue...")
+            
+        except ValueError:
+            print("\n❌ Invalid input. Please enter numbers only.")
+            input("\nPress Enter to continue...")
+    
+    def view_contracts(self):
+        """View and manage team contracts."""
+        clear_screen()
+        print_header("CONTRACT MANAGEMENT")
         
-        length = input("Contract length in months (6-24): ").strip()
-        length = int(length) if length else 12
-        length = max(6, min(24, length))
+        team = self.game.player_team
+        roster = self.game.get_team_roster(self.game.player_team_id)
         
-        if salary > team.salary_cap_space:
-            print("Cannot afford this salary!")
-        elif self.game.sign_free_agent(player.id, salary, length):
-            print(f"\n✓ Signed {player.name} for {format_money(salary)}/mo, {length} months!")
+        # Budget info
+        print(f"\n💰 BUDGET")
+        print(f"   Yearly Salary Cap: ${team.finances.yearly_budget:,}")
+        print(f"   Current Payroll: ${team.yearly_salary:,}/year")
+        print(f"   Cap Space: ${team.salary_cap_space:,}/year")
+        
+        # Show all contracts
+        print_subheader("CURRENT CONTRACTS")
+        print(f"{'#':<3} {'Player':<15} {'OVR':<4} {'Age':<4} {'Salary':<12} {'Years':<6} {'Status'}")
+        print("-" * 65)
+        
+        expiring_players = []
+        
+        for i, player in enumerate(roster, 1):
+            contract = team.contracts.get(player.id)
+            if contract:
+                salary_str = f"${contract.salary:,}/yr"
+                years_str = f"{contract.years}yr"
+                
+                if contract.years <= 1:
+                    status = "⚠️ EXPIRING"
+                    expiring_players.append(player)
+                else:
+                    status = "Active"
+                
+                print(f"{i:<3} {player.name:<15} {player.overall:<4} {player.age:<4} {salary_str:<12} {years_str:<6} {status}")
+        
+        # Options
+        print_subheader("OPTIONS")
+        if expiring_players:
+            print("1. Re-sign Expiring Contract")
         else:
-            print("Failed to sign player.")
+            print("1. (No expiring contracts)")
+        print("2. View Market Values")
+        print("0. Back")
+        
+        choice = input("\nSelect: ").strip()
+        
+        if choice == "1" and expiring_players:
+            self._select_resign(expiring_players)
+        elif choice == "2":
+            self._view_market_values(roster)
+    
+    def _select_resign(self, expiring_players):
+        """Select a player with expiring contract to re-sign."""
+        print("\n--- EXPIRING CONTRACTS ---")
+        for i, player in enumerate(expiring_players, 1):
+            market_val = self.game.get_market_value(player.id)
+            print(f"{i}. {player.name} (OVR: {player.overall}) - Market: ${market_val:,}/yr")
+        print("0. Cancel")
+        
+        choice = input("\nSelect player to re-sign: ").strip()
+        
+        try:
+            if choice == "0":
+                return
+            idx = int(choice) - 1
+            if 0 <= idx < len(expiring_players):
+                player = expiring_players[idx]
+                self._negotiate_contract(player, is_re_sign=True)
+        except (ValueError, IndexError):
+            print("Invalid selection.")
+            input("\nPress Enter to continue...")
+    
+    def _view_market_values(self, roster):
+        """View market values for all players."""
+        clear_screen()
+        print_header("MARKET VALUES")
+        
+        print(f"\n{'Player':<15} {'OVR':<4} {'Age':<4} {'Current':<12} {'Market Value':<12} {'Diff'}")
+        print("-" * 65)
+        
+        team = self.game.player_team
+        
+        for player in roster:
+            contract = team.contracts.get(player.id)
+            current = contract.salary if contract else 0
+            market = self.game.get_market_value(player.id)
+            diff = market - current
+            diff_str = f"+${diff:,}" if diff > 0 else f"-${abs(diff):,}" if diff < 0 else "Fair"
+            
+            print(f"{player.name:<15} {player.overall:<4} {player.age:<4} ${current:,}/yr    ${market:,}/yr    {diff_str}")
         
         input("\nPress Enter to continue...")
     

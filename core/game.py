@@ -17,6 +17,10 @@ from .simulation.training import (
     TrainingManager, MoraleManager, ChemistryManager, ProgressionManager,
     TRAINING_ATTRIBUTE_MAP
 )
+from .simulation.contracts import (
+    ContractNegotiator, ContractManager, NegotiationState, 
+    Willingness, ExpiringContract
+)
 from .data.generator import (
     create_initial_game_state, generate_player, generate_free_agent_pool,
     generate_rookie_class, retire_old_free_agents
@@ -165,9 +169,10 @@ class Game:
         """Get all available free agents."""
         return [self.players[pid] for pid in self.free_agent_ids if pid in self.players]
     
-    def sign_free_agent(self, player_id: str, salary: int, length: int) -> bool:
+    def sign_free_agent(self, player_id: str, salary: int, years: int) -> bool:
         """
         Sign a free agent to the player's team.
+        Salary is yearly, years is contract length (1-5).
         Returns True if successful.
         """
         if not self.player_team:
@@ -186,17 +191,16 @@ class Game:
         if team.roster_size >= 5:
             return False
         
-        # Check budget
+        # Check budget (yearly)
         if salary > team.salary_cap_space:
             return False
         
         # Create contract
-        contract = Contract(
+        contract = ContractManager.create_contract(
             player_id=player_id,
             team_id=team.id,
             salary=salary,
-            length=length,
-            buyout=salary * 3
+            years=years
         )
         
         # Add to team
@@ -210,10 +214,157 @@ class Game:
         if self.season_manager:
             self.season_manager.add_event(
                 "signing",
-                f"{team.name} signs {player.name} (${salary}/mo, {length} months)"
+                f"{team.name} signs {player.name} (${salary:,}/yr, {years} year{'s' if years > 1 else ''})"
             )
         
         return True
+    
+    # =========================================================================
+    # Contract Negotiation System
+    # =========================================================================
+    
+    def start_negotiation(
+        self,
+        player_id: str,
+        is_re_sign: bool = False
+    ) -> Optional[NegotiationState]:
+        """
+        Start contract negotiation with a player.
+        
+        Args:
+            player_id: The player to negotiate with
+            is_re_sign: True if re-signing existing player
+        
+        Returns:
+            NegotiationState or None if player not found
+        """
+        player = self.players.get(player_id)
+        if not player:
+            return None
+        
+        team = self.player_team
+        if not team:
+            return None
+        
+        # Get previous salary if re-signing
+        previous_salary = 0
+        if is_re_sign and player_id in team.contracts:
+            previous_salary = team.contracts[player_id].salary
+        
+        # Get team stats for market value calculation
+        team_stats = {
+            'wins': team.season_stats.series_wins,
+            'losses': team.season_stats.series_losses
+        }
+        
+        # Get league standings for willingness calculation
+        standings = self.get_standings()
+        
+        return ContractNegotiator.start_negotiation(
+            player=player,
+            team=team,
+            is_re_sign=is_re_sign,
+            league_standings=standings,
+            team_stats=team_stats,
+            previous_salary=previous_salary
+        )
+    
+    def make_contract_offer(
+        self,
+        state: NegotiationState,
+        salary: int,
+        years: int
+    ) -> tuple:
+        """
+        Make a contract offer during negotiation.
+        
+        Returns:
+            (accepted: bool, message: str)
+        """
+        player = self.players.get(state.player_id)
+        player_name = player.name if player else "The player"
+        
+        accepted, message = ContractNegotiator.make_offer(state, salary, years)
+        
+        # Replace placeholder with actual name
+        message = message.replace("The player", player_name)
+        
+        if accepted:
+            # Sign the player
+            if state.is_re_sign:
+                # Update existing contract
+                self.player_team.contracts[state.player_id] = ContractManager.create_contract(
+                    player_id=state.player_id,
+                    team_id=self.player_team.id,
+                    salary=salary,
+                    years=years
+                )
+                if self.season_manager:
+                    self.season_manager.add_event(
+                        "re_signing",
+                        f"{self.player_team.name} re-signs {player_name} (${salary:,}/yr, {years} year{'s' if years > 1 else ''})"
+                    )
+            else:
+                # Sign as free agent
+                self.sign_free_agent(state.player_id, salary, years)
+        
+        return accepted, message
+    
+    def end_contract_talks(self, state: NegotiationState) -> str:
+        """
+        End negotiations without a deal.
+        If re-signing, player becomes a free agent.
+        """
+        player = self.players.get(state.player_id)
+        player_name = player.name if player else "The player"
+        
+        message = ContractNegotiator.end_negotiations(state)
+        message = message.replace("The player", player_name)
+        
+        # If re-signing failed, release the player
+        if state.is_re_sign:
+            self.release_player(state.player_id)
+        
+        return message
+    
+    def get_expiring_contracts(self) -> List[ExpiringContract]:
+        """Get list of expiring contracts on player's team."""
+        if not self.player_team:
+            return []
+        
+        return ContractManager.get_expiring_contracts(
+            self.player_team, self.players
+        )
+    
+    def get_market_value(self, player_id: str) -> int:
+        """Get a player's market value (yearly salary)."""
+        player = self.players.get(player_id)
+        if not player:
+            return 0
+        
+        team_stats = None
+        if self.player_team:
+            team_stats = {
+                'wins': self.player_team.season_stats.series_wins,
+                'losses': self.player_team.season_stats.series_losses
+            }
+        
+        return ContractNegotiator.calculate_market_value(player, team_stats)
+    
+    def process_season_contracts(self):
+        """
+        Process contracts at end of season.
+        Decrements years remaining on all contracts.
+        Called at season end.
+        """
+        expired_by_team = {}
+        
+        for team_id, team in self.teams.items():
+            expired = ContractManager.process_contract_year(team)
+            if expired:
+                expired_by_team[team_id] = expired
+        
+        return expired_by_team
     
     def release_player(self, player_id: str) -> bool:
         """

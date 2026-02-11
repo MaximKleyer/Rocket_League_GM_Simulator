@@ -45,28 +45,48 @@ class Contract:
     """Player contract details."""
     player_id: str
     team_id: str
-    salary: int  # Monthly salary in dollars
-    length: int  # Months remaining
+    salary: int  # Yearly salary in dollars
+    years: int  # Years remaining on contract (1-5)
     buyout: int  # Buyout clause amount
     
-    def monthly_cost(self) -> int:
+    # Legacy support for old saves
+    length: int = 0  # Deprecated, use years
+    
+    def __post_init__(self):
+        # Convert old monthly contracts to yearly
+        if self.length > 0 and self.years == 0:
+            self.years = max(1, self.length // 12)
+            self.salary = self.salary * 12  # Convert monthly to yearly
+            self.length = 0
+    
+    def yearly_cost(self) -> int:
         return self.salary
     
     def total_value(self) -> int:
-        return self.salary * self.length
+        return self.salary * self.years
     
     def to_dict(self) -> dict:
         return {
             'player_id': self.player_id,
             'team_id': self.team_id,
             'salary': self.salary,
-            'length': self.length,
+            'years': self.years,
             'buyout': self.buyout
         }
     
     @classmethod
     def from_dict(cls, data: dict) -> 'Contract':
-        return cls(**data)
+        # Handle legacy 'length' field
+        if 'length' in data and 'years' not in data:
+            data['years'] = max(1, data.get('length', 12) // 12)
+            data['salary'] = data.get('salary', 0) * 12
+        return cls(
+            player_id=data['player_id'],
+            team_id=data['team_id'],
+            salary=data.get('salary', 0),
+            years=data.get('years', 1),
+            buyout=data.get('buyout', 0)
+        )
 
 
 @dataclass  
@@ -131,6 +151,11 @@ class Finances:
     @property
     def monthly_revenue(self) -> int:
         return self.sponsor_income + self.merch_income + self.content_income
+    
+    @property
+    def yearly_budget(self) -> int:
+        """Yearly salary budget."""
+        return self.monthly_budget * 12
     
     def process_month(self, salary_expenses: int) -> int:
         """Process monthly finances. Returns new balance."""
@@ -219,14 +244,19 @@ class Team:
         return len(self.roster)
     
     @property
+    def yearly_salary(self) -> int:
+        """Total yearly salary obligations."""
+        return sum(c.yearly_cost() for c in self.contracts.values())
+    
+    @property
     def monthly_salary(self) -> int:
-        """Total monthly salary obligations."""
-        return sum(c.monthly_cost() for c in self.contracts.values())
+        """Total monthly salary obligations (for display)."""
+        return self.yearly_salary // 12
     
     @property
     def salary_cap_space(self) -> int:
-        """Remaining budget space."""
-        return self.finances.monthly_budget - self.monthly_salary
+        """Remaining yearly budget space."""
+        return self.finances.yearly_budget - self.yearly_salary
     
     def add_player(self, player_id: str, contract: Contract):
         """Sign a player to the roster."""

@@ -190,22 +190,22 @@ def generate_team(
         
         new_players.append(player)
         
-        # Create contract
+        # Create contract (yearly salaries)
         salary_ranges = {
-            "star": (8000, 12000),
-            "good": (5000, 8000),
-            "average": (3000, 5000),
-            "prospect": (1500, 3000)
+            "star": (100000, 150000),     # $100k-$150k/year
+            "good": (60000, 100000),      # $60k-$100k/year
+            "average": (36000, 60000),    # $36k-$60k/year
+            "prospect": (18000, 36000)    # $18k-$36k/year
         }
-        min_sal, max_sal = salary_ranges.get(ptier, (3000, 5000))
+        min_sal, max_sal = salary_ranges.get(ptier, (36000, 60000))
         salary = random.randint(min_sal, max_sal)
         
         contract = Contract(
             player_id=player.id,
             team_id=team.id,
             salary=salary,
-            length=random.randint(6, 24),  # 6-24 months
-            buyout=salary * 6
+            years=random.randint(1, 3),  # 1-3 years
+            buyout=salary * 2
         )
         
         team.add_player(player.id, contract)
