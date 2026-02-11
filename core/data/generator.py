@@ -218,17 +218,33 @@ def generate_team(
 
 def generate_league(
     region: str,
-    num_teams: int = 8,
+    num_teams: int = 32,
     tier_distribution: Dict[str, int] = None
 ) -> Tuple['League', Dict[str, Team], Dict[str, Player]]:
     """
     Generate a complete league with teams and players.
+    Default is 32 teams for RLCS regional format.
     """
     from ..simulation.season import League
     
     if tier_distribution is None:
-        # Default: 1 star, 2 good, 3 average, 2 prospect
-        tier_distribution = {"star": 1, "good": 2, "average": 3, "prospect": 2}
+        # Distribution for 32 teams - pyramid structure
+        if num_teams >= 32:
+            tier_distribution = {
+                "star": 4,       # Top tier teams
+                "good": 8,       # Solid contenders
+                "average": 12,   # Middle of the pack
+                "prospect": 8    # Developing teams
+            }
+        elif num_teams >= 16:
+            tier_distribution = {
+                "star": 2,
+                "good": 4,
+                "average": 6,
+                "prospect": 4
+            }
+        else:
+            tier_distribution = {"star": 1, "good": 2, "average": 3, "prospect": 2}
     
     # Ensure we have enough teams
     total_requested = sum(tier_distribution.values())
@@ -496,12 +512,13 @@ def retire_old_free_agents(
 def create_initial_game_state() -> Dict:
     """
     Create complete initial game state for a new game.
+    Generates 31 AI teams (player adds the 32nd).
     Returns dict with league, teams, players, and free_agents.
     """
-    # Generate NA league as the primary league
-    league, teams, players = generate_league("NA", num_teams=8)
+    # Generate NA league with 31 teams (player team is 32nd)
+    league, teams, players = generate_league("NA", num_teams=31)
     
-    # Generate larger free agent pool (30 players)
+    # Generate free agent pool
     free_agents = generate_free_agent_pool("NA", count=25)
     
     # Add some rookies to the initial pool

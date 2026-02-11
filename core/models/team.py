@@ -138,7 +138,7 @@ class TeamStats:
 class Finances:
     """Team financial state."""
     balance: int = 100000  # Current cash
-    monthly_budget: int = 25000  # Spending limit per month
+    monthly_budget: int = 30000  # Spending limit per month
     
     # Revenue streams
     sponsor_income: int = 10000  # Monthly

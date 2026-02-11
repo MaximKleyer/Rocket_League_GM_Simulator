@@ -348,54 +348,150 @@ class CLI:
         input("\nPress Enter to continue...")
     
     def view_standings(self):
-        """Display league standings."""
+        """Display tournament standings or season point standings."""
         clear_screen()
-        print_header("LEAGUE STANDINGS")
         
-        standings = self.game.get_standings()
+        # Check if in a regional tournament
+        tournament_status = self.game.get_tournament_status()
         
-        print(f"\n{'Rank':<5} {'Team':<20} {'Series':<10} {'Games':<12} {'Pts':<5}")
-        print("-" * 55)
-        
-        for s in standings:
-            marker = ">>>" if s['is_player_team'] else "   "
-            series = f"{s['wins']}-{s['losses']}"
-            games = f"{s['game_wins']}-{s['game_losses']}"
-            print(f"{marker}{s['rank']:<2} {s['team_abbrev']:<20} {series:<10} {games:<12} {s['points']:<5}")
+        if tournament_status:
+            self._show_tournament_standings(tournament_status)
+        else:
+            self._show_season_standings()
         
         input("\nPress Enter to continue...")
     
-    def view_schedule(self):
-        """Display match schedule."""
-        clear_screen()
-        print_header(f"SCHEDULE - {self.game.current_phase.value.replace('_', ' ').title()}")
+    def _show_tournament_standings(self, status):
+        """Show current tournament standings."""
+        print_header(f"TOURNAMENT - {status['stage']}")
         
-        schedule = self.game.get_schedule()
-        current_week = self.game.current_week
+        if 'group' in status:
+            print(f"\nYou are in Group {status['group']}")
         
-        # Group by week
-        weeks = {}
-        for match in schedule:
-            if match['phase'] == self.game.current_phase.value:
-                week = match['week']
-                if week not in weeks:
-                    weeks[week] = []
-                weeks[week].append(match)
+        if 'record' in status:
+            print(f"Your Record: {status['record']}")
+            if status.get('qualified'):
+                print("Status: ✅ QUALIFIED")
+            elif status.get('eliminated'):
+                print("Status: ❌ ELIMINATED")
+            else:
+                print("Status: 🔄 Still Playing")
         
-        for week in sorted(weeks.keys()):
-            marker = " <-- Current" if week == current_week else ""
-            print(f"\n Week {week}{marker}")
-            print("-" * 40)
+        if 'standings' in status and status['standings']:
+            print_subheader("STANDINGS")
+            print(f"\n{'#':<3} {'Team':<22} {'Record':<8} {'G.Diff':<7} {'Status'}")
+            print("-" * 50)
             
-            for match in weeks[week]:
-                if match['is_played']:
-                    result = match['result']
-                    status = f"  {result}"
-                else:
-                    status = "  vs"
+            for i, s in enumerate(status['standings'], 1):
+                marker = "→" if s.get('is_player') else " "
+                print(f"{marker}{i:<2} {s['team_name'][:20]:<22} {s['record']:<8} {s['game_diff']:<7} {s.get('status', '')}")
+        
+        if 'bracket' in status:
+            print_subheader("PLAYOFF BRACKET")
+            bracket = status['bracket']
+            print(f"Phase: {bracket.get('current_phase', 'Unknown')}")
+            if bracket.get('placements'):
+                print("\nPlacements:")
+                for place, teams in sorted(bracket['placements'].items()):
+                    for tid in teams:
+                        team = self.game.teams.get(tid)
+                        name = team.name if team else tid
+                        print(f"  {place}. {name}")
+    
+    def _show_season_standings(self):
+        """Show overall season point standings."""
+        print_header("SEASON STANDINGS")
+        
+        # Sort by season points
+        sorted_teams = sorted(
+            self.game.season_points.items(),
+            key=lambda x: -x[1]
+        )
+        
+        print(f"\n{'Rank':<5} {'Team':<22} {'Points':<8} {'Record':<10}")
+        print("-" * 50)
+        
+        for rank, (team_id, points) in enumerate(sorted_teams, 1):
+            team = self.game.teams.get(team_id)
+            if team:
+                marker = "→" if team_id == self.game.player_team_id else " "
+                record = team.season_stats.series_record
+                print(f"{marker}{rank:<4} {team.name[:20]:<22} {points:<8} {record:<10}")
+    
+    def view_schedule(self):
+        """Display tournament status and recent results."""
+        clear_screen()
+        
+        phase_name = self.game.current_phase.value.replace('_', ' ').title()
+        print_header(f"TOURNAMENT STATUS - {phase_name}")
+        
+        tournament_status = self.game.get_tournament_status()
+        
+        if tournament_status:
+            print(f"\nStage: {tournament_status['stage']}")
+            
+            if 'group' in tournament_status:
+                print(f"Your Group: {tournament_status['group']}")
+            
+            if 'record' in tournament_status:
+                print(f"Your Record: {tournament_status['record']}")
                 
-                marker = "*" if match['involves_player'] else " "
-                print(f"{marker} {match['home_team']}{status} {match['away_team']}")
+                if tournament_status.get('qualified'):
+                    print("Status: ✅ QUALIFIED FOR NEXT STAGE")
+                elif tournament_status.get('eliminated'):
+                    print("Status: ❌ ELIMINATED")
+                else:
+                    print("Status: 🔄 Still competing")
+            
+            # Show Swiss bracket standings
+            if 'standings' in tournament_status and tournament_status['standings']:
+                print_subheader("CURRENT BRACKET STANDINGS")
+                
+                # Group by record
+                qualified = []
+                active = []
+                eliminated = []
+                
+                for s in tournament_status['standings']:
+                    if s.get('status') == '✅':
+                        qualified.append(s)
+                    elif s.get('status') == '❌':
+                        eliminated.append(s)
+                    else:
+                        active.append(s)
+                
+                if qualified:
+                    print("\n🏆 QUALIFIED:")
+                    for s in qualified:
+                        marker = " ★" if s.get('is_player') else ""
+                        print(f"   {s['team_name'][:18]} ({s['record']}){marker}")
+                
+                if active:
+                    print("\n🔄 STILL PLAYING:")
+                    for s in active:
+                        marker = " ★" if s.get('is_player') else ""
+                        print(f"   {s['team_name'][:18]} ({s['record']}){marker}")
+                
+                if eliminated:
+                    print("\n❌ ELIMINATED:")
+                    for s in eliminated:
+                        marker = " ★" if s.get('is_player') else ""
+                        print(f"   {s['team_name'][:18]} ({s['record']}){marker}")
+        else:
+            # Not in a tournament
+            print("\nNo active tournament.")
+            print("Check standings for season points.")
+        
+        # Show season points summary
+        print_subheader("SEASON POINTS")
+        points = self.game.season_points.get(self.game.player_team_id, 0)
+        sorted_teams = sorted(self.game.season_points.items(), key=lambda x: -x[1])
+        rank = 1
+        for tid, pts in sorted_teams:
+            if tid == self.game.player_team_id:
+                break
+            rank += 1
+        print(f"Your Points: {points} (Rank #{rank} of {len(sorted_teams)})")
         
         input("\nPress Enter to continue...")
     
@@ -937,38 +1033,62 @@ class CLI:
             input("\nPress Enter to continue...")
     
     def advance_week(self):
-        """Advance the game by one week."""
+        """Advance the game by one round in the tournament."""
         clear_screen()
-        print_header("ADVANCING WEEK...")
+        print_header("ADVANCING ROUND...")
         
         phase_before = self.game.current_phase
         
         results = self.game.advance_week()
         
         if results:
-            print(f"\nWeek {self.game.current_week - 1} Results:")
-            print("-" * 40)
-            
+            # Group results by stage
+            stages = {}
             for result in results:
-                home_team = self.game.teams.get(result['home_team_id'])
-                away_team = self.game.teams.get(result['away_team_id'])
+                stage = result.get('stage', 'Match')
+                if stage not in stages:
+                    stages[stage] = []
+                stages[stage].append(result)
+            
+            for stage, stage_results in stages.items():
+                round_num = stage_results[0].get('round', '')
+                round_str = f" - Round {round_num}" if round_num else ""
+                print(f"\n{stage}{round_str} Results:")
+                print("-" * 50)
                 
-                home_name = home_team.abbreviation if home_team else "???"
-                away_name = away_team.abbreviation if away_team else "???"
-                
-                winner = home_name if result['home_wins'] > result['away_wins'] else away_name
-                score = f"{result['home_wins']}-{result['away_wins']}"
-                
-                # Mark player's match
-                is_player_match = (result['home_team_id'] == self.game.player_team_id or
-                                  result['away_team_id'] == self.game.player_team_id)
-                marker = ">>> " if is_player_match else "    "
-                
-                print(f"{marker}{home_name} {score} {away_name} (Winner: {winner})")
+                for result in stage_results:
+                    team1 = result.get('team1', '???')
+                    team2 = result.get('team2', '???')
+                    score = result.get('score', '?-?')
+                    winner = result.get('winner', '???')
+                    
+                    # Show records for Swiss
+                    rec1 = result.get('team1_record', '')
+                    rec2 = result.get('team2_record', '')
+                    
+                    # Mark player's match
+                    is_player = (result.get('team1_id') == self.game.player_team_id or
+                                result.get('team2_id') == self.game.player_team_id)
+                    marker = ">>> " if is_player else "    "
+                    
+                    if rec1 and rec2:
+                        print(f"{marker}{team1[:12]} ({rec1}) vs {team2[:12]} ({rec2}) - {score}")
+                    else:
+                        print(f"{marker}{team1[:12]} vs {team2[:12]} - {score} (W: {winner[:10]})")
+        
+        # Show tournament status
+        status = self.game.get_tournament_status()
+        if status:
+            print(f"\n📊 TOURNAMENT STATUS: {status['stage']}")
+            if 'record' in status:
+                print(f"   Your Record: {status['record']}")
+                if status.get('qualified'):
+                    print("   ✅ QUALIFIED FOR NEXT STAGE!")
+                elif status.get('eliminated'):
+                    print("   ❌ ELIMINATED FROM TOURNAMENT")
         
         # Check for phase change
         if self.game.current_phase != phase_before:
-            # Format phase name nicely
             phase_name = self.game.current_phase.value.replace('_', ' ').title()
             if 'Split1' in phase_name:
                 phase_name = phase_name.replace('Split1 ', 'Split 1 - ')
@@ -978,11 +1098,15 @@ class CLI:
             print(f"\n*** Phase Complete! ***")
             print(f"Moving to: {phase_name}")
             
-            # Special messages for key phases
+            # Show final regional placement
+            if phase_before in REGIONAL_PHASES:
+                player_points = self.game.season_points.get(self.game.player_team_id, 0)
+                print(f"\n🏁 Regional Complete!")
+                print(f"   Season Points: {player_points}")
+            
             if self.game.current_phase == SeasonPhase.SPLIT_BREAK:
                 print("\n🏕️ SPLIT BREAK - Training Camp!")
                 print("Teams are undergoing intensive training.")
-                print("Chemistry bonuses applied based on roster stability.")
             
             elif self.game.current_phase == SeasonPhase.WORLDS:
                 print("\n🏆 WORLD CHAMPIONSHIP!")
@@ -990,49 +1114,43 @@ class CLI:
             
             elif self.game.current_phase == SeasonPhase.SEASON_END:
                 print("\n=== SEASON COMPLETE ===")
-                standings = self.game.get_standings()
-                if standings:
-                    champion = standings[0]
-                    print(f"Champion: {champion['team_name']}")
+                
+                # Show final standings by points
+                sorted_teams = sorted(self.game.season_points.items(), key=lambda x: -x[1])
+                print("\nFinal Season Standings:")
+                for i, (tid, pts) in enumerate(sorted_teams[:10], 1):
+                    team = self.game.teams.get(tid)
+                    name = team.name if team else tid
+                    marker = " <<<" if tid == self.game.player_team_id else ""
+                    print(f"  {i}. {name}: {pts} pts{marker}")
                 
                 continue_choice = input("\nStart next season? (y/n): ").strip().lower()
                 if continue_choice == 'y':
                     self.game.start_new_season()
                     print(f"\n✓ Season {self.game.season_number} begins!")
         
-        # Show recent events (including AI activity and training)
+        # Show recent events
         events = self.game.get_recent_events(10)
         if events:
             print("\nRecent News:")
-            for event in events[-8:]:
-                # Emoji prefixes for different event types
-                if event['type'] in ['ai_signing', 'ai_release']:
-                    prefix = "📰"
-                elif event['type'] == 'match_result':
+            for event in events[-6:]:
+                if event['type'] in ['match_win', 'bracket_win']:
+                    prefix = "✅"
+                elif event['type'] in ['match_loss', 'bracket_loss']:
+                    prefix = "❌"
+                elif event['type'] in ['qualified', 'regional_podium', 'regional_top8']:
                     prefix = "🏆"
-                elif event['type'] in ['signing', 'release']:
-                    prefix = "✍️"
-                elif event['type'] == 'training':
-                    prefix = "📈"
-                elif event['type'] in ['split_break_chemistry', 'split_break_training']:
-                    prefix = "🏕️"
-                elif event['type'] in ['phase_start', 'phase_end']:
-                    prefix = "📅"
-                elif event['type'] in ['progression_up', 'season_progression_up']:
-                    prefix = "⬆️"
-                elif event['type'] in ['progression_down', 'season_progression_down']:
-                    prefix = "⬇️"
-                elif event['type'] == 'chemistry_up':
-                    prefix = "💚"
-                elif event['type'] == 'chemistry_down':
+                elif event['type'] in ['eliminated', 'regional_eliminated']:
                     prefix = "💔"
+                elif event['type'] in ['ai_signing', 'ai_release']:
+                    prefix = "📰"
+                elif event['type'] == 'regional_start':
+                    prefix = "🏁"
+                elif event['type'] == 'stage_complete':
+                    prefix = "📊"
                 else:
                     prefix = "•"
                 print(f"  {prefix} {event['message']}")
-        
-        # Show training reminder if available
-        if self.game.can_train() and self.game.current_phase in REGIONAL_PHASES:
-            print("\n💡 TIP: Training available this week! Go to Training menu to train your team.")
         
         input("\nPress Enter to continue...")
     

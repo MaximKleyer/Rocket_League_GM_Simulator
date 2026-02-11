@@ -21,6 +21,9 @@ from .simulation.contracts import (
     ContractNegotiator, ContractManager, NegotiationState, 
     Willingness, ExpiringContract
 )
+from .simulation.tournament import (
+    SwissBracket, DoubleEliminationBracket, RegionalTournament, REGIONAL_POINTS
+)
 from .data.generator import (
     create_initial_game_state, generate_player, generate_free_agent_pool,
     generate_rookie_class, retire_old_free_agents
@@ -67,6 +70,10 @@ class Game:
         self.league_ai: Optional[LeagueAI] = None  # AI manager for all teams
         self.training_manager: TrainingManager = TrainingManager()  # Training system
         
+        # Tournament system
+        self.current_regional: Optional[RegionalTournament] = None
+        self.season_points: Dict[str, int] = {}  # Accumulated points per team
+        
         self.settings = GameSettings()
         
         # Metadata
@@ -81,8 +88,9 @@ class Game:
     def new_game(self, team_name: str, team_abbrev: str, region: str = "NA"):
         """
         Start a new game with the player managing a new team.
+        32 teams total (31 AI + player team).
         """
-        # Generate initial state
+        # Generate initial state (31 AI teams)
         state = create_initial_game_state()
         
         self.league = state['league']
@@ -90,8 +98,7 @@ class Game:
         self.players = state['players']
         self.free_agent_ids = state['free_agent_ids']
         
-        # Create player's team (or let them pick one)
-        # For now, create a new team
+        # Create player's team (32nd team)
         from .data.generator import generate_team
         player_team, roster = generate_team(region, tier="average")
         player_team.name = team_name
@@ -105,6 +112,9 @@ class Game:
             self.players[p.id] = p
         
         self.player_team_id = player_team.id
+        
+        # Initialize season points for all teams
+        self.season_points = {tid: 0 for tid in self.teams}
         
         # Initialize season manager
         self.season_manager = SeasonManager(self.league, self.teams, self.players)
@@ -780,8 +790,8 @@ class Game:
     
     def advance_week(self) -> List[dict]:
         """
-        Advance the game by one week.
-        Simulates matches and processes morale/chemistry.
+        Advance the game by one round/week.
+        Simulates tournament matches and processes morale/chemistry.
         AI teams train automatically. Player training is manual.
         Returns match results.
         """
@@ -795,52 +805,421 @@ class Game:
         if self.current_phase in REGIONAL_PHASES:
             self.process_ai_training()
         
-        # Simulate matches
-        results = self.season_manager.simulate_week()
+        results = []
         
-        # Process morale and chemistry after matches
-        for result in results:
-            # Update both teams
-            home_won = result.winner_id == result.home_team_id
+        # Handle regional tournament phases
+        if self.current_phase in REGIONAL_PHASES and self.current_regional:
+            results = self._simulate_tournament_round()
             
-            # Home team
-            self.update_morale_after_match(result.home_team_id, home_won)
-            chem_change = self.update_chemistry_after_match(result.home_team_id, home_won)
+            # Check if regional is complete
+            if self.current_regional.is_complete():
+                self._finalize_regional()
+                self.advance_phase()
+        else:
+            # Non-tournament phases (major, worlds - simplified for now)
+            old_results = self.season_manager.simulate_week()
+            results = [r.to_dict() for r in old_results]
             
-            # Away team
-            self.update_morale_after_match(result.away_team_id, not home_won)
-            self.update_chemistry_after_match(result.away_team_id, not home_won)
+            # Process morale and chemistry after matches
+            for r in old_results:
+                home_won = r.winner_id == r.home_team_id
+                self.update_morale_after_match(r.home_team_id, home_won)
+                self.update_chemistry_after_match(r.home_team_id, home_won)
+                self.update_morale_after_match(r.away_team_id, not home_won)
+                self.update_chemistry_after_match(r.away_team_id, not home_won)
             
-            # Log chemistry changes for player team if significant
-            if self.player_team_id in [result.home_team_id, result.away_team_id]:
-                player_won = (result.winner_id == self.player_team_id)
-                team = self.player_team
-                if abs(chem_change) >= 2:
-                    if chem_change > 0:
-                        self.season_manager.add_event(
-                            "chemistry_up",
-                            f"Team chemistry improved to {team.chemistry}! (Streak: {team.streak:+d})"
-                        )
-                    else:
-                        self.season_manager.add_event(
-                            "chemistry_down", 
-                            f"Team chemistry dropped to {team.chemistry}. (Streak: {team.streak:+d})"
-                        )
+            # Check for phase transitions
+            unplayed = [m for m in self.league.schedule 
+                       if m.phase == self.current_phase and not m.is_played]
+            if not unplayed:
+                self.advance_phase()
         
         # Process AI roster moves (chance each week)
-        if self.league_ai and random.random() < 0.3:  # 30% chance per week
+        if self.league_ai and random.random() < 0.3:
             self.process_ai_moves()
-        
-        # Check for phase transitions
-        unplayed = [m for m in self.league.schedule 
-                   if m.phase == self.current_phase and not m.is_played]
-        
-        if not unplayed:
-            self.advance_phase()
         
         self.last_played = datetime.now().isoformat()
         
-        return [r.to_dict() for r in results]
+        return results
+    
+    def _simulate_tournament_round(self) -> List[dict]:
+        """Simulate one round of the current tournament stage."""
+        if not self.current_regional:
+            return []
+        
+        results = []
+        regional = self.current_regional
+        
+        # Determine which stage we're in and get matches
+        if regional.current_stage == 'swiss_groups':
+            # Run a round for both groups
+            results.extend(self._run_swiss_round(regional.swiss_group_a, "Group A"))
+            results.extend(self._run_swiss_round(regional.swiss_group_b, "Group B"))
+            
+            # Check if groups are complete
+            if regional.swiss_group_a.is_complete and regional.swiss_group_b.is_complete:
+                regional.advance_stage()
+                self.season_manager.add_event(
+                    "stage_complete",
+                    "🏆 Swiss Groups complete! Top 16 advance to playoffs."
+                )
+        
+        elif regional.current_stage == 'swiss_playoffs':
+            results.extend(self._run_swiss_round(regional.swiss_playoffs, "Playoffs"))
+            
+            if regional.swiss_playoffs.is_complete:
+                regional.advance_stage()
+                self.season_manager.add_event(
+                    "stage_complete",
+                    "🏆 Swiss Playoffs complete! Top 8 advance to bracket."
+                )
+        
+        elif regional.current_stage == 'double_elim':
+            results.extend(self._run_double_elim_round(regional.double_elim))
+            
+            if regional.double_elim.is_complete:
+                regional.advance_stage()
+        
+        return results
+    
+    def _run_swiss_round(self, bracket: SwissBracket, stage_name: str) -> List[dict]:
+        """Run one round of a Swiss bracket."""
+        if bracket.is_complete:
+            return []
+        
+        # Generate matchups for this round
+        matchups = bracket.generate_round_matchups()
+        if not matchups:
+            return []
+        
+        results = []
+        match_engine = self.season_manager.match_engine
+        
+        for team1_id, team2_id in matchups:
+            team1 = self.teams.get(team1_id)
+            team2 = self.teams.get(team2_id)
+            
+            if not team1 or not team2:
+                continue
+            
+            # Get rosters
+            roster1 = self.get_team_roster(team1_id)
+            roster2 = self.get_team_roster(team2_id)
+            
+            # Simulate the series
+            series_result = match_engine.simulate_series(
+                team1, team2, roster1, roster2, best_of=bracket.best_of
+            )
+            
+            # Record result in bracket
+            bracket.record_result(
+                team1_id, team2_id,
+                series_result.home_wins, series_result.away_wins
+            )
+            
+            # Update team stats
+            self._update_team_stats(series_result)
+            
+            # Update morale and chemistry
+            team1_won = series_result.winner_id == team1_id
+            self.update_morale_after_match(team1_id, team1_won)
+            self.update_chemistry_after_match(team1_id, team1_won)
+            self.update_morale_after_match(team2_id, not team1_won)
+            self.update_chemistry_after_match(team2_id, not team1_won)
+            
+            result_dict = {
+                'stage': stage_name,
+                'round': bracket.current_round,
+                'team1': team1.name,
+                'team2': team2.name,
+                'team1_id': team1_id,
+                'team2_id': team2_id,
+                'score': f"{series_result.home_wins}-{series_result.away_wins}",
+                'winner': self.teams[series_result.winner_id].name,
+                'winner_id': series_result.winner_id,
+                'team1_record': bracket.records[team1_id].record_str,
+                'team2_record': bracket.records[team2_id].record_str
+            }
+            results.append(result_dict)
+            
+            # Log player team matches
+            if self.player_team_id in [team1_id, team2_id]:
+                player_won = series_result.winner_id == self.player_team_id
+                opponent = team2.name if team1_id == self.player_team_id else team1.name
+                player_record = bracket.records[self.player_team_id].record_str
+                
+                if player_won:
+                    self.season_manager.add_event(
+                        "match_win",
+                        f"✅ Victory vs {opponent}! Record: {player_record}",
+                        data=result_dict
+                    )
+                else:
+                    self.season_manager.add_event(
+                        "match_loss",
+                        f"❌ Loss vs {opponent}. Record: {player_record}",
+                        data=result_dict
+                    )
+                
+                # Check for elimination or qualification
+                player_rec = bracket.records[self.player_team_id]
+                if player_rec.wins >= bracket.win_threshold:
+                    self.season_manager.add_event(
+                        "qualified",
+                        f"🎉 QUALIFIED! Advanced with {player_record} record!"
+                    )
+                elif player_rec.losses >= bracket.loss_threshold:
+                    self.season_manager.add_event(
+                        "eliminated",
+                        f"💔 Eliminated from {stage_name} with {player_record} record."
+                    )
+        
+        return results
+    
+    def _run_double_elim_round(self, bracket: DoubleEliminationBracket) -> List[dict]:
+        """Run matches in the double elimination bracket."""
+        results = []
+        matches = bracket.get_next_matches()
+        
+        if not matches:
+            return []
+        
+        match_engine = self.season_manager.match_engine
+        
+        for match in matches:
+            team1_id = match['team1']
+            team2_id = match['team2']
+            
+            if not team1_id or not team2_id:
+                continue
+            
+            team1 = self.teams.get(team1_id)
+            team2 = self.teams.get(team2_id)
+            
+            if not team1 or not team2:
+                continue
+            
+            roster1 = self.get_team_roster(team1_id)
+            roster2 = self.get_team_roster(team2_id)
+            
+            series_result = match_engine.simulate_series(
+                team1, team2, roster1, roster2, best_of=bracket.best_of
+            )
+            
+            bracket.record_result(
+                match['match_id'],
+                series_result.winner_id,
+                series_result.home_wins,
+                series_result.away_wins
+            )
+            
+            self._update_team_stats(series_result)
+            
+            team1_won = series_result.winner_id == team1_id
+            self.update_morale_after_match(team1_id, team1_won)
+            self.update_chemistry_after_match(team1_id, team1_won)
+            self.update_morale_after_match(team2_id, not team1_won)
+            self.update_chemistry_after_match(team2_id, not team1_won)
+            
+            result_dict = {
+                'stage': 'Playoffs',
+                'match_id': match['match_id'],
+                'team1': team1.name,
+                'team2': team2.name,
+                'team1_id': team1_id,
+                'team2_id': team2_id,
+                'score': f"{series_result.home_wins}-{series_result.away_wins}",
+                'winner': self.teams[series_result.winner_id].name,
+                'winner_id': series_result.winner_id
+            }
+            results.append(result_dict)
+            
+            # Log player team matches
+            if self.player_team_id in [team1_id, team2_id]:
+                player_won = series_result.winner_id == self.player_team_id
+                opponent = team2.name if team1_id == self.player_team_id else team1.name
+                
+                if player_won:
+                    self.season_manager.add_event(
+                        "bracket_win",
+                        f"✅ Bracket win vs {opponent}!",
+                        data=result_dict
+                    )
+                else:
+                    self.season_manager.add_event(
+                        "bracket_loss",
+                        f"❌ Bracket loss vs {opponent}.",
+                        data=result_dict
+                    )
+        
+        return results
+    
+    def _update_team_stats(self, result):
+        """Update team season stats from a match result."""
+        winner = self.teams.get(result.winner_id)
+        loser = self.teams.get(result.loser_id)
+        
+        if winner:
+            winner.season_stats.series_wins += 1
+            winner.season_stats.wins += result.home_wins if result.winner_id == result.home_team_id else result.away_wins
+            winner.season_stats.losses += result.away_wins if result.winner_id == result.home_team_id else result.home_wins
+            winner.season_stats.goals_for += sum(g.home_score if result.winner_id == result.home_team_id else g.away_score for g in result.games)
+            winner.season_stats.goals_against += sum(g.away_score if result.winner_id == result.home_team_id else g.home_score for g in result.games)
+        
+        if loser:
+            loser.season_stats.series_losses += 1
+            loser.season_stats.wins += result.home_wins if result.loser_id == result.home_team_id else result.away_wins
+            loser.season_stats.losses += result.away_wins if result.loser_id == result.home_team_id else result.home_wins
+            loser.season_stats.goals_for += sum(g.home_score if result.loser_id == result.home_team_id else g.away_score for g in result.games)
+            loser.season_stats.goals_against += sum(g.away_score if result.loser_id == result.home_team_id else g.home_score for g in result.games)
+    
+    def _finalize_regional(self):
+        """Finalize regional and award points."""
+        if not self.current_regional:
+            return
+        
+        regional = self.current_regional
+        
+        # Award points
+        for team_id, points in regional.points_earned.items():
+            if team_id not in self.season_points:
+                self.season_points[team_id] = 0
+            self.season_points[team_id] += points
+            
+            # Store in team stats
+            team = self.teams.get(team_id)
+            if team:
+                placement = regional.final_placements.get(team_id, 32)
+                team.season_stats.regional_placements.append(placement)
+        
+        # Log player team result
+        if self.player_team_id:
+            placement = regional.final_placements.get(self.player_team_id, 32)
+            points = regional.points_earned.get(self.player_team_id, 0)
+            total_points = self.season_points.get(self.player_team_id, 0)
+            
+            if placement <= 3:
+                self.season_manager.add_event(
+                    "regional_podium",
+                    f"🏆 {placement}{'st' if placement == 1 else 'nd' if placement == 2 else 'rd'} PLACE! +{points} points (Total: {total_points})"
+                )
+            elif placement <= 8:
+                self.season_manager.add_event(
+                    "regional_top8",
+                    f"🎯 Top 8 finish ({placement}th). +{points} points (Total: {total_points})"
+                )
+            elif placement <= 16:
+                self.season_manager.add_event(
+                    "regional_top16",
+                    f"📊 Top 16 finish ({placement}th). +{points} points (Total: {total_points})"
+                )
+            else:
+                self.season_manager.add_event(
+                    "regional_eliminated",
+                    f"📉 Eliminated in groups ({placement}th). 0 points (Total: {total_points})"
+                )
+        
+        self.current_regional = None
+    
+    def start_regional(self):
+        """Start a new regional tournament."""
+        team_ids = list(self.teams.keys())
+        
+        if len(team_ids) != 32:
+            raise ValueError(f"Need 32 teams for regional, have {len(team_ids)}")
+        
+        phase_name = self.current_phase.value.replace('_', ' ').title()
+        self.current_regional = RegionalTournament(
+            teams=team_ids,
+            name=phase_name
+        )
+        
+        # Log which group player is in
+        if self.player_team_id:
+            if self.player_team_id in self.current_regional.swiss_group_a.team_ids:
+                group = "A"
+            else:
+                group = "B"
+            self.season_manager.add_event(
+                "regional_start",
+                f"🏁 {phase_name} begins! You're in Group {group}."
+            )
+    
+    def get_tournament_status(self) -> Optional[dict]:
+        """Get current tournament status for display."""
+        if not self.current_regional:
+            return None
+        
+        regional = self.current_regional
+        status = {
+            'stage': regional.get_current_stage_name(),
+            'is_complete': regional.is_complete()
+        }
+        
+        if regional.current_stage == 'swiss_groups':
+            # Get player's group status
+            if self.player_team_id in regional.swiss_group_a.team_ids:
+                bracket = regional.swiss_group_a
+                status['group'] = 'A'
+            else:
+                bracket = regional.swiss_group_b
+                status['group'] = 'B'
+            
+            player_rec = bracket.records.get(self.player_team_id)
+            if player_rec:
+                status['record'] = player_rec.record_str
+                status['qualified'] = self.player_team_id in bracket.qualified
+                status['eliminated'] = self.player_team_id in bracket.eliminated
+            
+            status['standings'] = self._get_swiss_standings(bracket)
+        
+        elif regional.current_stage == 'swiss_playoffs':
+            bracket = regional.swiss_playoffs
+            player_rec = bracket.records.get(self.player_team_id)
+            if player_rec:
+                status['record'] = player_rec.record_str
+                status['qualified'] = self.player_team_id in bracket.qualified
+                status['eliminated'] = self.player_team_id in bracket.eliminated
+            else:
+                status['eliminated'] = True  # Didn't make playoffs
+            
+            status['standings'] = self._get_swiss_standings(bracket)
+        
+        elif regional.current_stage == 'double_elim':
+            bracket = regional.double_elim
+            status['bracket'] = self._get_bracket_status(bracket)
+        
+        return status
+    
+    def _get_swiss_standings(self, bracket: SwissBracket) -> List[dict]:
+        """Get Swiss bracket standings for display."""
+        standings = []
+        for rec in bracket.get_standings():
+            team = self.teams.get(rec.team_id)
+            if team:
+                status = ""
+                if rec.team_id in bracket.qualified:
+                    status = "✅"
+                elif rec.team_id in bracket.eliminated:
+                    status = "❌"
+                
+                standings.append({
+                    'team_id': rec.team_id,
+                    'team_name': team.name,
+                    'record': rec.record_str,
+                    'game_diff': f"+{rec.game_diff}" if rec.game_diff > 0 else str(rec.game_diff),
+                    'status': status,
+                    'is_player': rec.team_id == self.player_team_id
+                })
+        return standings
+    
+    def _get_bracket_status(self, bracket: DoubleEliminationBracket) -> dict:
+        """Get double elim bracket status for display."""
+        return {
+            'placements': bracket.placements,
+            'current_phase': bracket.current_phase,
+            'is_complete': bracket.is_complete
+        }
     
     def process_ai_moves(self) -> List[dict]:
         """
@@ -882,6 +1261,10 @@ class Game:
         
         new_phase = self.season_manager.advance_phase()
         
+        # Start regional tournaments
+        if new_phase in REGIONAL_PHASES:
+            self.start_regional()
+        
         # AI teams make moves between regional phases and during breaks
         ai_move_phases = [
             SeasonPhase.SPLIT1_REGIONAL_2, SeasonPhase.SPLIT1_REGIONAL_3,
@@ -903,6 +1286,9 @@ class Game:
             # Reset streaks for all teams
             for team in self.teams.values():
                 team.streak = 0
+            
+            # Reset season points
+            self.season_points = {tid: 0 for tid in self.teams}
         
         return new_phase
     
